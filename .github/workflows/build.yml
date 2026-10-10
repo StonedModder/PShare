@@ -1,0 +1,182 @@
+# PShare - Lint, test, build, and publish releases.
+# Copyright (C) 2026 PShare contributors
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# Every pull request and every push to main is linted, tested and built. A tag
+# that equals sce_sys/param.json's contentVersion (for example 01.000.000)
+# builds the same way and publishes a GitHub release with the app-folder ZIP,
+# pshared.elf and SHA256SUMS.
+
+name: Build
+
+on:
+  push:
+    branches: [main]
+    tags:
+      - "[0-9][0-9].[0-9][0-9][0-9].[0-9][0-9][0-9]"
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Lint, test and build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    # The write entries are for the attestation step only. A pull request from
+    # a fork gets neither, whatever is asked.
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    env:
+      CCACHE_DIR: ${{ github.workspace }}/.deps/ccache
+      CCACHE_MAXSIZE: 500M
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
+
+      - name: Install the toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes clang-18 clang-format-18 lld-18 llvm-18 make ninja-build ccache \
+            pkg-config tar unzip wget git libcurl4-openssl-dev
+          sudo ln -sf /usr/bin/clang-18 /usr/local/bin/clang
+          sudo ln -sf /usr/bin/clang++-18 /usr/local/bin/clang++
+
+      - name: Restore dependencies
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            .deps/native
+            .deps/pacbrew
+            .deps/ps5-opengl
+            .deps/lapy
+          key: deps-${{ runner.os }}-ubuntu24-${{ hashFiles('tools/setup-*-dependencies.sh', 'tools/fetch-opengl-sdk.sh', 'tools/build-lapy-helper.py') }}
+
+      - name: Restore compiler cache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: .deps/ccache
+          key: ccache-${{ runner.os }}-clang18-${{ github.sha }}-${{ github.run_id }}
+          restore-keys: |
+            ccache-${{ runner.os }}-clang18-
+
+      - name: Read the app identity and version
+        shell: bash
+        run: |
+          metadata=$(python3 -c 'import json; p=json.load(open("sce_sys/param.json")); print(p["titleId"], p["contentVersion"])')
+          read -r title_id content_version <<< "$metadata"
+          [[ $title_id =~ ^PPSA[0-9]{5}$ ]] || exit 2
+          [[ $content_version =~ ^[0-9]{2}\.[0-9]{3}\.[0-9]{3}$ ]] || exit 2
+          if [[ $GITHUB_REF_TYPE == tag && $GITHUB_REF_NAME != "$content_version" ]]; then
+            echo "The release tag must equal param.json's contentVersion: $content_version" >&2
+            exit 2
+          fi
+          echo "TITLE_ID=$title_id" >> "$GITHUB_ENV"
+          echo "BUILD_JOBS=$(nproc)" >> "$GITHUB_ENV"
+          echo "USE_CCACHE=1" >> "$GITHUB_ENV"
+
+      - name: Check formatting
+        run: make lint
+
+      - name: Run the tests
+        run: make test
+
+      - name: Build the app folder, its ZIP and pshared.elf
+        run: make app
+
+      - name: Check the generated runtime is the published one
+        run: cd runtime && sha256sum -c libc.prx.sha256
+
+      - name: Write release checksums
+        run: cd dist && sha256sum "$TITLE_ID.zip" pshared.elf > SHA256SUMS
+
+      # Signed provenance: these files were built by this workflow from this
+      # commit (`gh attestation verify <file> -R <owner>/<repo>`). Not for pull
+      # requests, and not in a private repository.
+      - name: Attest the release files
+        if: github.event_name != 'pull_request' && !github.event.repository.private
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: |
+            dist/${{ env.TITLE_ID }}.zip
+            dist/pshared.elf
+
+      - name: Upload the build
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: PShare-${{ github.sha }}
+          path: |
+            dist/${{ env.TITLE_ID }}.zip
+            dist/pshared.elf
+            dist/SHA256SUMS
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+
+  release:
+    name: GitHub release
+    if: github.ref_type == 'tag'
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      actions: read
+      contents: write
+
+    steps:
+      - name: Download the verified build
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          gh run download "$GITHUB_RUN_ID"
+          --repo "$GITHUB_REPOSITORY"
+          --name "PShare-$GITHUB_SHA"
+          --dir release
+
+      - name: Check the release files
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd release
+          ls -la
+          sha256sum -c SHA256SUMS
+
+      - name: Publish the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG=$GITHUB_REF_NAME
+          assets=(release/PPSA*.zip release/pshared.elf release/SHA256SUMS)
+          # Create the release, or fill one written in advance that has no ZIP
+          # yet; a ZIP that is already published is never replaced.
+          if ! gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create "$TAG" "${assets[@]}" \
+              --repo "$GITHUB_REPOSITORY" \
+              --verify-tag \
+              --generate-notes \
+              --title "PShare $TAG"
+            exit 0
+          fi
+          existing=$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name')
+          while IFS= read -r name; do
+            if [[ $name == *.zip ]]; then
+              echo "::warning title=Release already has a ZIP::$TAG already has a ZIP; nothing was replaced."
+              exit 0
+            fi
+          done <<< "$existing"
+          gh release upload "$TAG" "${assets[@]}" --repo "$GITHUB_REPOSITORY"

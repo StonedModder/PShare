@@ -1,0 +1,102 @@
+name: "Bug report"
+description: "Something in PShare does not work as it should"
+title: "[Bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Before you post**
+
+        - Do not post Sony SDK files, firmware, decrypted system files, keys or links to them.
+  - type: input
+    id: version
+    attributes:
+      label: "Version or commit"
+      description: "Release tag or commit hash"
+    validations:
+      required: true
+  - type: input
+    id: host
+    attributes:
+      label: "Build machine"
+      description: "Only if you built PShare yourself: operating system and compiler, for example Ubuntu 24.04 in WSL, clang 18"
+    validations:
+      required: false
+  - type: input
+    id: system
+    attributes:
+      label: "PS5 system software version"
+      description: "For example 12.02. Leave empty if the problem happens on the PC only"
+    validations:
+      required: false
+  - type: dropdown
+    id: area
+    attributes:
+      label: "Where does it happen?"
+      options:
+        - "Captures / clip player"
+        - "Uploading (Discord, Telegram, catbox, ...)"
+        - "USB drive or PC share copies"
+        - "Background uploader (pshared)"
+        - "Phone / browser page"
+        - "Starting the app or file access (Lapy)"
+        - "Building from source"
+        - "Something else"
+    validations:
+      required: true
+  - type: dropdown
+    id: enabler
+    attributes:
+      label: "Homebrew enabler"
+      options:
+        - "etaHEN"
+        - "kstuff-lite"
+        - "onionHEN"
+        - "Other (name it below)"
+        - "Not sure"
+    validations:
+      required: false
+  - type: input
+    id: enabler_version
+    attributes:
+      label: "Homebrew enabler version"
+      description: "For example etaHEN 2.5b. Name it here if you chose Other."
+    validations:
+      required: false
+  - type: input
+    id: shadowmount
+    attributes:
+      label: "ShadowMountPlus version"
+      description: "Leave empty if you do not use it"
+    validations:
+      required: false
+  - type: textarea
+    id: what
+    attributes:
+      label: "What happened?"
+      description: "What you saw, and what you expected instead"
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: "Steps to reproduce"
+      description: "What you pressed or set up, in order"
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: "Log"
+      description: "/data/pshare/pshared.log, or the app's [PShare] log lines. Remove webhook URLs and tokens first."
+      render: text
+    validations:
+      required: false
+  - type: checkboxes
+    id: confirm
+    attributes:
+      label: "Checks"
+      options:
+        - label: "I searched the open and closed issues for this problem."
+          required: true

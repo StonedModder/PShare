@@ -1,0 +1,4 @@
+QR Code generator library (C), Project Nayuki, MIT License.
+https://github.com/nayuki/QR-Code-generator  tag v1.8.0  (c/qrcodegen.c, c/qrcodegen.h)
+sha256 qrcodegen.c 300eff07ee25baaa7578f20284411638154716379437391e7e689c0e6ce81403
+sha256 qrcodegen.h e82df4bff37d18b5863b9e7486fe6bda1b6cda8c3b9ecebfec473907265cb589

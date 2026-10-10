@@ -1,0 +1,1098 @@
+// PShare - pshared, the background uploader.
+// Copyright (C) 2026 PShare contributors
+// SPDX-License-Identifier: GPL-3.0-or-later
+//
+// A small program that keeps running after the app closes, notices every
+// new screenshot and clip, and sends it to the configured destination.
+//
+// It is a payload for the jailbreak's ELF loader (127.0.0.1:9021); the PShare
+// app sends it there. Payloads run outside the app sandbox, so the capture
+// folders and /data are readable without any further elevation.
+//
+//   127.0.0.1:9077  control line for the app (PING, STATUS, PAUSE, ...)
+//   0.0.0.0:9078    phone setup page, only while the app has it switched on
+//
+// The same file builds on a PC (no PSHARE_PAYLOAD) for testing; the roots
+// then come from PSHARE_DATA / PSHARE_PHOTO / PSHARE_VIDEO / PSHARE_APPMETA.
+
+#include "pshare/core/config.hpp"
+#include "pshare/core/history.hpp"
+#include "pshare/core/media.hpp"
+#include "pshare/core/net.hpp"
+#include "pshare/core/setup_web.hpp"
+#include "pshare/core/text.hpp"
+#include "pshare/core/upload.hpp"
+#include "pshare/core/watcher.hpp"
+
+#include <algorithm>
+#include <atomic>
+#include <cerrno>
+#include <csignal>
+#include <cstdarg>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <ctime>
+#include <deque>
+#include <fcntl.h>
+#include <map>
+#include <mutex>
+#include <netinet/in.h>
+#include <string>
+#include <sys/socket.h>
+#include <sys/stat.h>
+#include <thread>
+#include <unistd.h>
+
+namespace pshare
+{
+namespace
+{
+constexpr std::size_t kLogLimit = 512 * 1024;
+constexpr int kSetupMinutes = 30;
+
+std::int64_t now_seconds()
+{
+    return static_cast<std::int64_t>(std::time(nullptr));
+}
+
+// ---- log -------------------------------------------------------------------
+
+class Log
+{
+  public:
+    void open(std::string path)
+    {
+        path_ = std::move(path);
+    }
+    void write(const char *format, ...) __attribute__((format(printf, 2, 3)))
+    {
+        char message[1024];
+        va_list arguments;
+        va_start(arguments, format);
+        std::vsnprintf(message, sizeof(message), format, arguments);
+        va_end(arguments);
+        const std::time_t now = std::time(nullptr);
+        std::tm parts{};
+        localtime_r(&now, &parts);
+        char line[1100];
+        const int length = std::snprintf(line, sizeof(line), "%04d-%02d-%02d %02d:%02d:%02d %s\n",
+                                         parts.tm_year + 1900, parts.tm_mon + 1, parts.tm_mday,
+                                         parts.tm_hour, parts.tm_min, parts.tm_sec, message);
+        std::lock_guard<std::mutex> lock(mutex_);
+#if !defined(PSHARE_PAYLOAD)
+        std::fputs(line, stderr);
+#endif
+        if (path_.empty() || length <= 0)
+            return;
+        struct stat info
+        {
+        };
+        if (stat(path_.c_str(), &info) == 0 && static_cast<std::size_t>(info.st_size) > kLogLimit)
+            rename(path_.c_str(), (path_ + ".1").c_str());
+        const int descriptor = ::open(path_.c_str(), O_WRONLY | O_CREAT | O_APPEND, 0644);
+        if (descriptor < 0)
+            return;
+        (void)::write(descriptor, line, static_cast<std::size_t>(length));
+        close(descriptor);
+    }
+
+  private:
+    std::string path_;
+    std::mutex mutex_;
+};
+
+Log g_log;
+
+// ---- shared state ----------------------------------------------------------
+
+// QUEUE [<destination>\t]<path>: the app hands an upload over, so it goes on
+// after the app closes. An empty destination is the configured one. Each gets
+// a number the app asks RESULT about.
+struct ManualJob
+{
+    int id = 0;
+    std::string destination;
+    std::string path;
+};
+
+struct Shared
+{
+    std::mutex mutex;
+    DaemonStatus status;
+    std::deque<ManualJob> manual;
+    int next_job = 1;
+    int current_job = 0;
+    // RESULT answers: "ok <destination>\t<link>" or "failed <destination>\t<error>",
+    // the newest 64.
+    std::map<int, std::string> results;
+    bool paused = false;
+    bool reload = false;
+    bool rescan = false;
+    std::int64_t setup_until = 0; // the phone page is open until then
+    std::int64_t app_seen = 0;    // the app's last "STATUS app": the page stays up meanwhile
+};
+
+Shared g_shared;
+std::atomic<bool> g_quit{false};
+UploadProgress g_progress;
+
+// The build this copy is, for telling a newer pshared from an older one. The
+// app reads the same marker out of the pshared.elf it ships.
+#ifndef PSHARE_BUILD
+#define PSHARE_BUILD dev
+#endif
+#define PSHARE_TEXT2(x) #x
+#define PSHARE_TEXT(x) PSHARE_TEXT2(x)
+const char kBuildMarker[] = "PSHARE_BUILD=" PSHARE_TEXT(PSHARE_BUILD);
+
+const char *build_id()
+{
+    return kBuildMarker + sizeof("PSHARE_BUILD=") - 1;
+}
+
+Paths paths_from_environment()
+{
+    Paths paths;
+#if !defined(PSHARE_PAYLOAD)
+    if (const char *value = std::getenv("PSHARE_DATA"))
+        paths.data_root = value;
+    if (const char *value = std::getenv("PSHARE_PHOTO"))
+        paths.photo_root = value;
+    if (const char *value = std::getenv("PSHARE_VIDEO"))
+        paths.video_root = value;
+    if (const char *value = std::getenv("PSHARE_APPMETA"))
+        paths.appmeta_root = value;
+#endif
+    return paths;
+}
+
+int port_from_environment(const char *name, int fallback)
+{
+#if !defined(PSHARE_PAYLOAD)
+    if (const char *value = std::getenv(name))
+        return static_cast<int>(parse_int(value, fallback));
+#else
+    (void)name;
+#endif
+    return fallback;
+}
+
+// ---- control line ----------------------------------------------------------
+
+// The phone page (setup, captures, the viewer) is up while SETUP is on and
+// while the app is running. Call with g_shared.mutex held.
+bool web_open_locked()
+{
+    const std::int64_t now = now_seconds();
+    return g_shared.setup_until > now || g_shared.app_seen > now - 15;
+}
+
+int queue_manual(const std::string &destination, const std::string &path, std::string *error)
+{
+    MediaItem item;
+    if (path.empty() || !describe_media(path, &item))
+    {
+        *error = "not a capture";
+        return 0;
+    }
+    if (g_shared.manual.size() >= 500)
+    {
+        *error = "queue full";
+        return 0;
+    }
+    ManualJob job;
+    job.id = g_shared.next_job++;
+    job.destination = destination;
+    job.path = path;
+    g_shared.manual.push_back(std::move(job));
+    g_shared.rescan = true;
+    return g_shared.next_job - 1;
+}
+
+// RESULT's answer for a job: "ok <dest>\t<link>", "failed <dest>\t<error>",
+// "pending" or "unknown". Call with g_shared.mutex held.
+std::string job_result_locked(int id)
+{
+    const auto found = g_shared.results.find(id);
+    if (found != g_shared.results.end())
+        return found->second;
+    if (id == g_shared.current_job && id != 0)
+        return "pending";
+    for (const ManualJob &job : g_shared.manual)
+        if (job.id == id)
+            return "pending";
+    return "unknown";
+}
+
+std::string handle_command(std::string_view line)
+{
+    const std::string text(trim(line));
+    const std::size_t space = text.find(' ');
+    const std::string verb = upper(text.substr(0, space));
+    const std::string argument =
+        space == std::string::npos ? std::string() : std::string(trim(text.substr(space + 1)));
+    std::lock_guard<std::mutex> lock(g_shared.mutex);
+    if (verb == "PING")
+        return std::string("pong pshared ") + kVersion + " " + build_id() + "\n";
+    if (verb == "STATUS")
+    {
+        // The app asks every second; while it runs, its browser pages are up.
+        if (iequals(argument, "app"))
+            g_shared.app_seen = now_seconds();
+        DaemonStatus status = g_shared.status;
+        status.queued += static_cast<int>(g_shared.manual.size());
+        if (!web_open_locked())
+            status.setup_port = 0;
+        status.job = g_shared.current_job;
+        std::string reply = status.serialize();
+        reply += "sent=" + std::to_string(g_progress.sent.load()) + "\n";
+        reply += "total=" + std::to_string(g_progress.total.load()) + "\n";
+        return reply;
+    }
+    if (verb == "PAUSE")
+    {
+        g_shared.paused = true;
+        g_shared.status.state = "paused";
+        g_log.write("paused by the app");
+        return "ok\n";
+    }
+    if (verb == "RESUME")
+    {
+        g_shared.paused = false;
+        g_shared.status.state = "watching";
+        g_log.write("resumed by the app");
+        return "ok\n";
+    }
+    if (verb == "RELOAD")
+    {
+        g_shared.reload = true;
+        return "ok\n";
+    }
+    if (verb == "RESCAN")
+    {
+        g_shared.rescan = true;
+        return "ok\n";
+    }
+    if (verb == "CANCEL")
+    {
+        // What the app handed over and has not gone yet is dropped too.
+        for (const ManualJob &job : g_shared.manual)
+            g_shared.results[job.id] = "failed " + job.destination + "\tCancelled";
+        g_shared.manual.clear();
+        g_progress.cancel = true;
+        return "ok\n";
+    }
+    if (verb == "QUEUE")
+    {
+        const std::size_t tab = argument.find('\t');
+        const std::string destination =
+            tab == std::string::npos ? std::string() : std::string(trim(argument.substr(0, tab)));
+        const std::string path =
+            tab == std::string::npos ? argument : std::string(trim(argument.substr(tab + 1)));
+        std::string error;
+        const int id = queue_manual(destination, path, &error);
+        if (id == 0)
+            return "error " + error + "\n";
+        return "ok " + std::to_string(id) + "\n";
+    }
+    if (verb == "RESULT")
+        return job_result_locked(static_cast<int>(parse_int(argument, 0))) + "\n";
+    if (verb == "SETUP")
+    {
+        if (iequals(argument, "off"))
+        {
+            g_shared.setup_until = 0;
+            return "ok\n";
+        }
+        g_shared.setup_until = now_seconds() + kSetupMinutes * 60;
+        g_log.write("phone setup page open for %d minutes", kSetupMinutes);
+        return "ok\n";
+    }
+    if (verb == "QUIT")
+    {
+        g_quit = true;
+        g_progress.cancel = true;
+        g_log.write("asked to stop");
+        return "ok\n";
+    }
+    return "error unknown command\n";
+}
+
+void control_thread(int listener)
+{
+    while (!g_quit.load())
+    {
+        const int client = accept(listener, nullptr, nullptr);
+        if (client < 0)
+        {
+            if (errno != EINTR && errno != EAGAIN && errno != EWOULDBLOCK)
+                usleep(200000);
+            continue;
+        }
+        socket_timeouts(client, 1500);
+        std::string line;
+        char buffer[512];
+        while (line.find('\n') == std::string::npos && line.size() < 2048)
+        {
+            const ssize_t got = recv(client, buffer, sizeof(buffer), 0);
+            if (got <= 0)
+                break;
+            line.append(buffer, static_cast<std::size_t>(got));
+        }
+        if (!line.empty())
+            send_all(client, handle_command(line.substr(0, line.find('\n'))));
+        close(client);
+    }
+}
+
+// ---- phone setup page ------------------------------------------------------
+
+bool save_config_from(const Paths &paths, const Config &config, std::string *error)
+{
+    IniDocument document;
+    std::string text;
+    if (read_text_file(paths.config(), &text))
+        document.parse(text);
+    else
+        document.parse(default_config_text());
+    store_config(config, &document);
+    if (!write_text_file_atomic(paths.config(), document.write()))
+    {
+        if (error)
+            *error = "Could not write " + paths.config();
+        return false;
+    }
+    return true;
+}
+
+// What the setup thread does with a request: answer it, or stream a file from
+// a thread of its own (a clip can take minutes to download).
+struct WebReply
+{
+    std::string text;
+    std::string stream_path; // non-empty: stream this capture
+    bool download = false;
+    std::string range;
+};
+
+constexpr const char *kHtml = "text/html; charset=utf-8";
+constexpr int kGalleryPage = 48;
+
+// A capture inside the capture folders, and nothing else.
+bool servable(const Paths &paths, const std::string &path, MediaItem *item)
+{
+    if (path.find("/../") != std::string::npos || path.find("/./") != std::string::npos)
+        return false;
+    const bool inside =
+        starts_with(path, paths.photo_root + "/") || starts_with(path, paths.video_root + "/");
+    return inside && describe_media(path, item);
+}
+
+void stream_file(int client, std::string path, std::string range, bool download)
+{
+    socket_timeouts(client, 30000);
+    MediaItem item;
+    describe_media(path, &item);
+    const int file = ::open(path.c_str(), O_RDONLY);
+    struct stat info
+    {
+    };
+    if (file < 0 || fstat(file, &info) != 0)
+    {
+        send_all(client, web_response(404, "text/plain", "Gone"));
+        if (file >= 0)
+            close(file);
+        close(client);
+        return;
+    }
+    const std::uint64_t size = static_cast<std::uint64_t>(info.st_size);
+    std::uint64_t first = 0;
+    std::uint64_t last = size > 0 ? size - 1 : 0;
+    const bool partial = !range.empty() && parse_range(range, size, &first, &last);
+    std::string head = file_response_head(partial ? 206 : 200, item.content_type(), size, first,
+                                          last, download ? item.file : std::string());
+    if (size == 0)
+        head = web_response(200, item.content_type(), "");
+    bool ok = send_all(client, head);
+    if (size > 0 && first > 0)
+        ok = ok && lseek(file, static_cast<off_t>(first), SEEK_SET) == static_cast<off_t>(first);
+    std::vector<char> buffer(256 * 1024);
+    std::uint64_t left = size > 0 ? last - first + 1 : 0;
+    while (ok && left > 0 && !g_quit.load())
+    {
+        const ssize_t got =
+            read(file, buffer.data(),
+                 static_cast<std::size_t>(std::min<std::uint64_t>(left, buffer.size())));
+        if (got <= 0)
+            break;
+        ok = send_all(client, std::string_view(buffer.data(), static_cast<std::size_t>(got)));
+        left -= static_cast<std::uint64_t>(got);
+    }
+    close(file);
+    shutdown(client, SHUT_WR);
+    close(client);
+}
+
+std::vector<GalleryItem> gallery_items(const Paths &paths, TitleNames *names, int page, int *pages,
+                                       GalleryFilter *filter)
+{
+    ScanResult scan = scan_media(paths, ScanOptions{});
+    // Every game for the choice list, then only the chosen one, in the chosen order.
+    std::map<std::string, GalleryGame> games;
+    for (const MediaItem &capture : scan.items)
+    {
+        GalleryGame &game = games[capture.title_id];
+        game.title_id = capture.title_id;
+        if (game.name.empty())
+            game.name = names->display(capture.title_id);
+        ++game.count;
+    }
+    filter->games.clear();
+    for (auto &[id, game] : games)
+        filter->games.push_back(std::move(game));
+    std::sort(filter->games.begin(), filter->games.end(),
+              [](const GalleryGame &a, const GalleryGame &b)
+              { return a.count != b.count ? a.count > b.count : a.name < b.name; });
+    if (!filter->game.empty() && games.count(filter->game) == 0)
+        filter->game.clear();
+    if (!filter->game.empty())
+        scan.items.erase(std::remove_if(scan.items.begin(), scan.items.end(),
+                                        [&](const MediaItem &capture)
+                                        { return capture.title_id != filter->game; }),
+                         scan.items.end());
+    if (filter->oldest_first)
+        std::reverse(scan.items.begin(), scan.items.end());
+    const int count = static_cast<int>(scan.items.size());
+    *pages = std::max(1, (count + kGalleryPage - 1) / kGalleryPage);
+    page = std::clamp(page, 0, *pages - 1);
+    std::vector<GalleryItem> out;
+    for (int i = page * kGalleryPage; i < std::min(count, (page + 1) * kGalleryPage); ++i)
+    {
+        const MediaItem &capture = scan.items[static_cast<std::size_t>(i)];
+        GalleryItem item;
+        item.path = capture.path;
+        item.game = names->display(capture.title_id);
+        item.when = capture.captured.date() + " " + capture.captured.time();
+        item.size = human_size(capture.size);
+        item.video = capture.video();
+        out.push_back(std::move(item));
+    }
+    return out;
+}
+
+// The capture a short address names: /v/<file name without its extension>.
+bool capture_by_stem(const Paths &paths, std::string_view stem, MediaItem *found)
+{
+    if (stem.empty() || stem.find('/') != std::string_view::npos)
+        return false;
+    const ScanResult scan = scan_media(paths, ScanOptions{});
+    for (const MediaItem &item : scan.items)
+    {
+        const std::size_t dot = item.file.rfind('.');
+        if (std::string_view(item.file).substr(0, dot) == stem)
+        {
+            *found = item;
+            return true;
+        }
+    }
+    return false;
+}
+
+WebReply serve(const Paths &paths, const WebRequest &request, TitleNames *names)
+{
+    WebReply reply;
+    if (request.path == "/favicon.ico")
+    {
+        reply.text = web_response(404, "text/plain", "none");
+        return reply;
+    }
+    std::map<std::string, std::string> form;
+    if (request.method == "POST")
+        form = parse_form(request.body);
+
+    if (request.path == "/file")
+    {
+        const auto p = request.query.find("p");
+        MediaItem item;
+        if (p == request.query.end() || !servable(paths, p->second, &item))
+        {
+            reply.text = web_response(404, "text/plain", "Not a capture");
+            return reply;
+        }
+        if (capture_reads_blank(item.path))
+        {
+            reply.text = web_response(
+                409, "text/plain", "This capture reads back as empty (all zeros) on the console");
+            return reply;
+        }
+        reply.stream_path = item.path;
+        reply.download = request.query.count("dl") != 0;
+        const auto range = request.headers.find("range");
+        if (range != request.headers.end())
+            reply.range = range->second;
+        return reply;
+    }
+    if (request.path == "/view" || starts_with(request.path, "/v/"))
+    {
+        const auto p = request.query.find("p");
+        MediaItem capture;
+        const bool found =
+            starts_with(request.path, "/v/")
+                ? capture_by_stem(paths, url_decode(request.path.substr(3)), &capture)
+                : p != request.query.end() && servable(paths, p->second, &capture);
+        if (!found)
+        {
+            reply.text = web_response(404, "text/plain", "Not a capture");
+            return reply;
+        }
+        IniDocument document;
+        Config config;
+        std::vector<std::string> warnings;
+        load_config_file(paths.config(), &document, &config, &warnings);
+        ViewInfo info;
+        info.item.path = capture.path;
+        info.item.game = names->display(capture.title_id);
+        info.item.when = capture.captured.date() + " " + capture.captured.time();
+        info.item.size = human_size(capture.size);
+        info.item.video = capture.video();
+        info.blank = capture_reads_blank(capture.path);
+        const ScanResult scan = scan_media(paths, ScanOptions{});
+        for (std::size_t i = 0; i < scan.items.size(); ++i)
+            if (scan.items[i].path == capture.path)
+            {
+                if (i > 0)
+                    info.prev = scan.items[i - 1].path;
+                if (i + 1 < scan.items.size())
+                    info.next = scan.items[i + 1].path;
+                break;
+            }
+        const Destination *chosen = config.destination_for(capture.title_id);
+        for (const Destination &d : config.destinations)
+            if (d.enabled && d.configured())
+                info.destinations.push_back(
+                    {d.id, d.display_name(), chosen != nullptr && chosen->id == d.id});
+        History history(paths.history());
+        history.refresh();
+        if (const HistoryEntry *sent = history.last_success(capture.path))
+            if (starts_with(sent->detail, "http"))
+                info.link = sent->detail;
+        reply.text = web_response(200, kHtml, view_page(info));
+        return reply;
+    }
+    if (request.method == "POST" && request.path == "/send")
+    {
+        const std::string path = form.count("p") ? form.at("p") : std::string();
+        const std::string destination = form.count("d") ? form.at("d") : std::string();
+        MediaItem capture;
+        std::string body;
+        if (!servable(paths, path, &capture))
+        {
+            body = "{\"error\":\"That capture is gone\"}";
+        }
+        else
+        {
+            std::string error;
+            int id = 0;
+            {
+                std::lock_guard<std::mutex> lock(g_shared.mutex);
+                id = queue_manual(destination, path, &error);
+            }
+            body = id > 0 ? "{\"id\":" + std::to_string(id) + "}"
+                          : "{\"error\":\"" + json_escape(error) + "\"}";
+            g_log.write("browser asked to send %s to %s", capture.file.c_str(),
+                        destination.empty() ? "the default" : destination.c_str());
+        }
+        reply.text = web_response(200, "application/json", body);
+        return reply;
+    }
+    if (request.path == "/result")
+    {
+        const int id = static_cast<int>(
+            parse_int(request.query.count("id") ? request.query.at("id") : "0", 0));
+        std::string answer;
+        {
+            std::lock_guard<std::mutex> lock(g_shared.mutex);
+            answer = job_result_locked(id);
+        }
+        std::string body;
+        if (answer == "pending" || answer == "unknown")
+        {
+            body = "{\"state\":\"" + answer + "\"}";
+        }
+        else
+        {
+            const bool ok = starts_with(answer, "ok ");
+            const std::string rest = answer.substr(answer.find(' ') + 1);
+            const std::size_t tab = rest.find('\t');
+            const std::string dest_id =
+                tab == std::string::npos ? std::string() : rest.substr(0, tab);
+            const std::string detail = tab == std::string::npos ? rest : rest.substr(tab + 1);
+            IniDocument document;
+            Config config;
+            std::vector<std::string> warnings;
+            load_config_file(paths.config(), &document, &config, &warnings);
+            const Destination *d = config.find(dest_id);
+            body = std::string("{\"state\":\"") + (ok ? "ok" : "failed") + "\",\"dest\":\"" +
+                   json_escape(d != nullptr ? d->display_name() : dest_id) + "\",\"" +
+                   (ok ? "link" : "error") + "\":\"" + json_escape(detail) + "\"}";
+        }
+        reply.text = web_response(200, "application/json", body);
+        return reply;
+    }
+    if (request.path == "/gallery")
+    {
+        int pages = 1;
+        const int page = static_cast<int>(
+            parse_int(request.query.count("page") ? request.query.at("page") : "0", 0));
+        GalleryFilter filter;
+        if (const auto game = request.query.find("game"); game != request.query.end())
+            filter.game = game->second;
+        filter.oldest_first =
+            request.query.count("order") != 0 && request.query.at("order") == "old";
+        const std::vector<GalleryItem> items = gallery_items(paths, names, page, &pages, &filter);
+        reply.text = web_response(
+            200, kHtml, gallery_page(items, std::clamp(page, 0, pages - 1), pages, {}, filter));
+        return reply;
+    }
+
+    IniDocument document;
+    Config config;
+    std::vector<std::string> warnings;
+    load_config_file(paths.config(), &document, &config, &warnings);
+
+    if (request.method == "POST" && request.path == "/save")
+    {
+        std::vector<std::string> errors;
+        const int changed = apply_setup_form(form, &config, &errors);
+        std::string error;
+        if (changed > 0 && !save_config_from(paths, config, &error))
+            errors.push_back(error);
+        if (changed > 0)
+        {
+            std::lock_guard<std::mutex> lock(g_shared.mutex);
+            g_shared.reload = true;
+        }
+        g_log.write("phone setup saved %d change(s)", changed);
+        std::string notice;
+        if (errors.empty())
+            notice = changed > 0 ? "Saved. PShare uses the new settings right away."
+                                 : "Nothing changed.";
+        else
+            for (const std::string &line : errors)
+                notice += (notice.empty() ? "" : " ") + line + ".";
+        reply.text = web_response(200, kHtml, setup_page(config, notice, !errors.empty()));
+        return reply;
+    }
+    reply.text = web_response(200, kHtml, setup_page(config, {}, false));
+    return reply;
+}
+
+void setup_thread(const Paths &paths, int port)
+{
+    TitleNames names(
+        paths.appmeta_root,
+        {paths.photo_root, paths.video_root}); // this thread's own: the cache is not shared
+    int listener = -1;
+    bool listen_failed = false;
+    while (!g_quit.load())
+    {
+        bool open = false;
+        {
+            std::lock_guard<std::mutex> lock(g_shared.mutex);
+            open = web_open_locked();
+        }
+        if (!open)
+        {
+            if (listener >= 0)
+            {
+                close(listener);
+                listener = -1;
+                std::lock_guard<std::mutex> lock(g_shared.mutex);
+                g_shared.status.setup_port = 0;
+                g_log.write("phone setup page closed");
+            }
+            usleep(500000);
+            continue;
+        }
+        if (listener < 0)
+        {
+            listener = listen_tcp(0, port, 8);
+            if (listener < 0)
+            {
+                // Usually a pshared that is still stopping: try again shortly,
+                // and say so once rather than on every try.
+                if (!listen_failed)
+                    g_log.write("cannot listen on port %d for the setup page (errno %d)", port,
+                                errno);
+                listen_failed = true;
+                usleep(1000000);
+                continue;
+            }
+            listen_failed = false;
+            socket_timeouts(listener, 1000); // accept wakes up to check the clock
+            std::lock_guard<std::mutex> lock(g_shared.mutex);
+            g_shared.status.setup_port = port;
+        }
+        const int client = accept(listener, nullptr, nullptr);
+        if (client < 0)
+            continue;
+        socket_timeouts(client, 5000);
+        std::string raw;
+        char buffer[4096];
+        bool too_large = false;
+        for (;;)
+        {
+            const long head = web_head_length(raw);
+            if (head < 0)
+                break;
+            if (head > 0)
+            {
+                const std::size_t want = static_cast<std::size_t>(head) +
+                                         web_content_length(std::string_view(raw).substr(0, head));
+                if (want > 256 * 1024)
+                {
+                    too_large = true;
+                    break;
+                }
+                if (raw.size() >= want)
+                    break;
+            }
+            const ssize_t got = recv(client, buffer, sizeof(buffer), 0);
+            if (got <= 0)
+                break;
+            raw.append(buffer, static_cast<std::size_t>(got));
+        }
+        WebRequest request;
+        WebReply reply;
+        if (too_large)
+            reply.text = web_response(413, "text/plain", "Too large");
+        else if (!parse_web_request(raw, &request))
+            reply.text = web_response(400, "text/plain", "Bad request");
+        else
+            reply = serve(paths, request, &names);
+        if (!reply.stream_path.empty())
+        {
+            std::thread(stream_file, client, reply.stream_path, reply.range, reply.download)
+                .detach();
+            continue;
+        }
+        send_all(client, reply.text);
+        shutdown(client, SHUT_WR);
+        close(client);
+    }
+    if (listener >= 0)
+        close(listener);
+}
+
+// ---- the watch-and-send loop -----------------------------------------------
+
+struct Settings
+{
+    IniDocument document;
+    Config config;
+    std::int64_t mtime = -1;
+};
+
+std::int64_t file_mtime(const std::string &path)
+{
+    struct stat info
+    {
+    };
+    return stat(path.c_str(), &info) == 0 ? static_cast<std::int64_t>(info.st_mtime) : -1;
+}
+
+void load_settings(const Paths &paths, Settings *settings)
+{
+    std::vector<std::string> warnings;
+    Config config;
+    IniDocument document;
+    load_config_file(paths.config(), &document, &config, &warnings);
+    for (const std::string &warning : warnings)
+        g_log.write("config: %s", warning.c_str());
+    settings->config = std::move(config);
+    settings->document = std::move(document);
+    settings->mtime = file_mtime(paths.config());
+}
+
+void set_state(const char *state)
+{
+    std::lock_guard<std::mutex> lock(g_shared.mutex);
+    g_shared.status.state = state;
+}
+
+// Sends one capture to `forced` (an id), or to the destination the config picks.
+// Returns the id it went to, empty when nothing was sent.
+std::string send_one(const Paths &paths, const Config &config, TitleNames *names, History *history,
+                     const MediaItem &item, bool automatic, const std::string &forced = {},
+                     UploadOutcome *result = nullptr)
+{
+    const Destination *destination =
+        forced.empty() ? config.destination_for(item.title_id) : config.find(forced);
+    if (destination == nullptr || !destination->configured())
+    {
+        g_log.write("no destination is set up; skipping %s", item.file.c_str());
+        std::lock_guard<std::mutex> lock(g_shared.mutex);
+        g_shared.status.last_error = destination == nullptr
+                                         ? "No destination is set up"
+                                         : destination->display_name() + " is not set up";
+        if (result != nullptr)
+        {
+            result->ok = false;
+            result->destination = forced;
+            result->error = g_shared.status.last_error;
+        }
+        return {};
+    }
+    const std::string game = names->display(item.title_id);
+    set_state("uploading");
+    {
+        std::lock_guard<std::mutex> lock(g_shared.mutex);
+        g_shared.status.last_file = item.path;
+        g_shared.status.destination = destination->id;
+    }
+    g_progress.cancel = false;
+    g_log.write("sending %s (%s, %s) to %s", item.file.c_str(), game.c_str(),
+                human_size(item.size).c_str(), destination->id.c_str());
+    const UploadOutcome outcome = upload_capture(config, *destination, item, game, &g_progress);
+    g_progress.sent = 0;
+    g_progress.total = 0;
+    if (result != nullptr)
+        *result = outcome;
+
+    HistoryEntry entry;
+    entry.time = now_seconds();
+    entry.ok = outcome.ok;
+    entry.automatic = automatic;
+    entry.destination = outcome.destination;
+    entry.path = item.path;
+    entry.detail = outcome.ok ? outcome.link : outcome.error;
+    history->append(entry);
+
+    const Destination *used = config.find(outcome.destination);
+    const std::string where = used != nullptr ? used->display_name() : destination->display_name();
+    {
+        std::lock_guard<std::mutex> lock(g_shared.mutex);
+        if (outcome.ok)
+        {
+            ++g_shared.status.uploaded;
+            g_shared.status.last_link = outcome.link;
+            g_shared.status.last_error.clear();
+        }
+        else
+        {
+            ++g_shared.status.failed;
+            g_shared.status.last_error = outcome.error;
+        }
+        g_shared.status.state = g_shared.paused ? "paused" : "watching";
+        g_shared.status.destination.clear();
+    }
+    if (outcome.ok)
+        g_log.write("sent %s -> %s", item.file.c_str(), outcome.link.c_str());
+    else
+        g_log.write("failed %s: %s", item.file.c_str(), outcome.error.c_str());
+    if (config.notify)
+    {
+        if (outcome.ok)
+            notify(std::string("PShare: ") + item.kind_label() +
+                   (used != nullptr && used->local() ? " saved to " : " sent to ") + where);
+        else
+            notify("PShare: upload failed - " + outcome.error.substr(0, 120));
+    }
+    (void)paths;
+    return outcome.ok ? outcome.destination : std::string();
+}
+
+// The destinations in also_send that have not had this capture yet.
+void send_mirrors(const Paths &paths, const Config &config, TitleNames *names, History *history,
+                  const MediaItem &item, const std::string &already)
+{
+    for (const std::string &id : config.also_send)
+    {
+        const Destination *mirror = config.find(id);
+        if (mirror == nullptr || !mirror->enabled || !mirror->configured() || iequals(id, already))
+            continue;
+        send_one(paths, config, names, history, item, true, mirror->id);
+        if (g_quit.load())
+            return;
+    }
+}
+
+int run()
+{
+    std::signal(SIGPIPE, SIG_IGN);
+    const Paths paths = paths_from_environment();
+    const int control_port = port_from_environment("PSHARE_CONTROL_PORT", kControlPort);
+    const int setup_port = port_from_environment("PSHARE_SETUP_PORT", kSetupPort);
+    ensure_directory(paths.data_root);
+    g_log.open(paths.daemon_log());
+
+    int control = listen_tcp(0x7f000001, control_port, 8);
+    if (control < 0)
+    {
+        // A copy is running already. The same build stays; an older one is
+        // asked to stop, so installing a new PShare also updates its uploader.
+        std::string reply;
+        if (daemon_command("PING", &reply, 800, control_port))
+        {
+            const std::vector<std::string> words = split(trim(reply), ' ');
+            if (words.size() >= 4 && words[3] == build_id())
+            {
+                g_log.write("pshared is already running; this copy exits");
+                return 0;
+            }
+            g_log.write("replacing the running pshared (%s)", std::string(trim(reply)).c_str());
+            daemon_command("QUIT", nullptr, 800, control_port);
+            for (int i = 0; i < 100 && control < 0; ++i)
+            {
+                usleep(100000);
+                control = listen_tcp(0x7f000001, control_port, 8);
+            }
+        }
+        if (control < 0)
+        {
+            g_log.write("cannot listen on 127.0.0.1:%d (errno %d)", control_port, errno);
+            return 0;
+        }
+    }
+    socket_timeouts(control, 1000);
+    g_log.write("pshared %s (%s) started (pid %d)", kVersion, build_id(),
+                static_cast<int>(getpid()));
+
+    upload_global_init();
+    Settings settings;
+    load_settings(paths, &settings);
+    Watcher watcher(paths);
+    watcher.configure(settings.config);
+    watcher.load(now_seconds());
+    watcher.save();
+    History history(paths.history());
+    TitleNames names(paths.appmeta_root, {paths.photo_root, paths.video_root});
+    {
+        std::lock_guard<std::mutex> lock(g_shared.mutex);
+        g_shared.status.reachable = true;
+        g_shared.status.version = kVersion;
+        g_shared.status.build = build_id();
+        g_shared.status.started = now_seconds();
+        g_shared.status.state = "starting";
+    }
+
+    std::thread control_worker(control_thread, control);
+    std::thread setup_worker(setup_thread, paths, setup_port);
+
+    if (settings.config.notify)
+        notify("PShare is watching for new captures");
+
+    std::deque<MediaItem> queue;
+    std::int64_t next_poll = 0;
+    while (!g_quit.load())
+    {
+        bool reload = false;
+        bool rescan = false;
+        bool paused = false;
+        std::deque<ManualJob> manual;
+        {
+            std::lock_guard<std::mutex> lock(g_shared.mutex);
+            reload = g_shared.reload;
+            rescan = g_shared.rescan;
+            paused = g_shared.paused;
+            g_shared.reload = g_shared.rescan = false;
+            manual.swap(g_shared.manual);
+        }
+        if (reload || file_mtime(paths.config()) != settings.mtime)
+        {
+            load_settings(paths, &settings);
+            watcher.configure(settings.config);
+            g_log.write("configuration reloaded");
+        }
+        const Config &config = settings.config;
+
+        // Captures the app asked for go first and ignore auto_upload and pause.
+        for (const ManualJob &job : manual)
+        {
+            {
+                std::lock_guard<std::mutex> lock(g_shared.mutex);
+                g_shared.current_job = job.id;
+            }
+            MediaItem item;
+            UploadOutcome outcome;
+            if (describe_media(job.path, &item))
+                send_one(paths, config, &names, &history, item, false, job.destination, &outcome);
+            else
+                outcome.error = "The capture is gone";
+            if (outcome.destination.empty())
+                outcome.destination = job.destination;
+            std::string answer = outcome.ok ? "ok " : "failed ";
+            answer += outcome.destination + "\t" + (outcome.ok ? outcome.link : outcome.error);
+            for (char &c : answer)
+                if (c == '\n' || c == '\r')
+                    c = ' ';
+            {
+                std::lock_guard<std::mutex> lock(g_shared.mutex);
+                g_shared.current_job = 0;
+                g_shared.results[job.id] = std::move(answer);
+                while (g_shared.results.size() > 64)
+                    g_shared.results.erase(g_shared.results.begin());
+            }
+            if (g_quit.load())
+                break;
+        }
+
+        const std::int64_t now = now_seconds();
+        if (rescan || now >= next_poll)
+        {
+            next_poll = now + std::clamp(config.poll_seconds, 1, 300);
+            for (MediaItem &item : watcher.poll(now))
+                queue.push_back(std::move(item));
+            const std::string ip = local_ip_address();
+            {
+                std::lock_guard<std::mutex> lock(g_shared.mutex);
+                g_shared.status.ip = ip;
+                g_shared.status.watch_errno = watcher.last_errno();
+                g_shared.status.queued = static_cast<int>(queue.size() + watcher.pending());
+                if (g_shared.status.state == "starting")
+                    g_shared.status.state = paused ? "paused" : "watching";
+            }
+        }
+
+        if (!queue.empty() && !paused && config.auto_upload)
+        {
+            MediaItem item = std::move(queue.front());
+            queue.pop_front();
+            history.refresh();
+            // Skipped when the app already sent it.
+            if (!history.uploaded(item.path) && config.upload_allowed(item.title_id, item.video()))
+            {
+                const std::string went = send_one(paths, config, &names, &history, item, true);
+                send_mirrors(paths, config, &names, &history, item, went);
+            }
+            watcher.mark_seen(item.path);
+            watcher.save();
+            continue; // straight to the next one
+        }
+        if (!queue.empty() && !config.auto_upload)
+        {
+            // Off: noticed, not sent; the app can still send them by hand.
+            for (const MediaItem &item : queue)
+                watcher.mark_seen(item.path);
+            queue.clear();
+            watcher.save();
+        }
+        usleep(250000);
+    }
+
+    watcher.save();
+    shutdown(control, SHUT_RDWR);
+    close(control);
+    control_worker.join();
+    setup_worker.join();
+    g_log.write("pshared stopped");
+    return 0;
+}
+} // namespace
+} // namespace pshare
+
+int main()
+{
+    return pshare::run();
+}

@@ -1,0 +1,4 @@
+stb_image v2.30, Sean Barrett, public domain / MIT (dual).
+https://github.com/nothings/stb  commit f58f558c120e9b32c217290b80bad1a0729fbb2c  (stb_image.h)
+sha256 stb_image.h 594c2fe35d49488b4382dbfaec8f98366defca819d916ac95becf3e75f4200b3
+stb_image_write v1.16 (public domain / MIT), same upstream, commit 2c980bb59875b0d32144a71867fbdebb2f77cd20.
