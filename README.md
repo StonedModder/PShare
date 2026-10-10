@@ -23,15 +23,21 @@ code.
 > 9021 (the usual ps5-payload-dev `elfldr`).
 
 <p align="center">
-  <img src="docs/screens/captures.jpg" width="49%" alt="The captures gallery">
-  <img src="docs/screens/clip-player.jpg" width="49%" alt="A clip playing with its controls">
-  <img src="docs/screens/capture-details.jpg" width="49%" alt="A capture's details sheet">
-  <img src="docs/screens/auto-upload.jpg" width="49%" alt="The background uploader page">
-  <img src="docs/screens/history-qr.jpg" width="49%" alt="An upload's link as a QR code">
-  <img src="docs/screens/destination-form.jpg" width="49%" alt="Editing a destination">
+  <img src="docs/screens/clip-player.gif" width="98%" alt="A Teardown clip playing in PShare's clip player">
 </p>
 
-<sub>Screens rendered by the PC preview (`make preview`) with invented games.</sub>
+<p align="center">
+  <img src="docs/screens/captures.jpg" width="49%" alt="The gallery with real Teardown, Digimon World: Next Order and Dig Deep captures">
+  <img src="docs/screens/capture-details.jpg" width="49%" alt="A clip's details: play, send, open in a browser">
+  <img src="docs/screens/send-to.jpg" width="49%" alt="Send to: every destination, and the upload going out">
+  <img src="docs/screens/auto-upload.jpg" width="49%" alt="The background uploader page">
+  <img src="docs/screens/history-qr.jpg" width="49%" alt="An upload's link as a QR code">
+  <img src="docs/screens/phone-browser.jpg" width="49%" alt="A Dig Deep clip playing in PShare's browser page on a phone">
+  <img src="docs/screens/ps5-home-screen.jpg" width="49%" alt="PShare on a PS5 home screen">
+  <img src="docs/screens/ps5-qr.jpg" width="49%" alt="PShare running on a PS5, showing an upload's QR code">
+</p>
+
+<sub>Real captures from a PS5: Teardown, Digimon World: Next Order and Dig Deep, shown in PShare's own interface (rendered by the PC preview, <code>make preview</code>) and in its browser page. The last two pictures are screenshots taken on the console. The games belong to their publishers.</sub>
 
 ## Features
 
@@ -171,6 +177,13 @@ restart PShare. The log line `[PShare] elevation …` says which step stopped.
 **Uploads stop when I close the app.**
 They should not: check **Auto upload** shows the uploader as running, and
 that **Send uploads through it** is on.
+
+**Clips play in the app but not in the browser while PShare is closed.**
+After some console restarts the console hands jailbreak payloads, the
+background uploader included, nothing but zeros when they read a clip, while
+the app still reads it properly. While PShare is open, the app passes the clip
+to the uploader, so the browser page, downloads and uploads all work. Keep
+PShare open, or reload the jailbreak.
 
 **Discord does not accept my clip.**
 Without server boosts Discord takes files up to 10 MB. Keep `max_mb = 10` and
