@@ -282,6 +282,40 @@ DaemonStatus daemon_status(int port, bool from_app)
     return DaemonStatus::parse(reply);
 }
 
+bool relay_once(int wait_ms, const RelayRead &read, int port)
+{
+    Link link;
+    if (!link.open(port > 0 ? port : kControlPort, wait_ms + 3000))
+        return false;
+    if (!link.send_bytes("RELAY\n"))
+        return false;
+    std::string line;
+    char c = 0;
+    while (line.size() < 4096)
+    {
+        if (link.receive(&c, 1) <= 0)
+            return false;
+        if (c == '\n')
+            break;
+        line.push_back(c);
+    }
+    if (line == "none")
+        return true;
+    // "<first>\t<last>\t<path>"
+    const std::size_t a = line.find('\t');
+    const std::size_t b = a == std::string::npos ? a : line.find('\t', a + 1);
+    if (b == std::string::npos)
+        return true;
+    const long long first = parse_int(line.substr(0, a), -1);
+    const long long last = parse_int(line.substr(a + 1, b - a - 1), -1);
+    if (first < 0 || last < first)
+        return true;
+    read(line.substr(b + 1), static_cast<std::uint64_t>(first), static_cast<std::uint64_t>(last),
+         [&](std::string_view data) { return link.send_bytes(data); });
+    link.finish_sending();
+    return true;
+}
+
 std::string elf_build_id(std::string_view elf)
 {
     // This search string is in the ELF too, followed by nothing: skip it.

@@ -27,6 +27,8 @@
 #include <algorithm>
 #include <atomic>
 #include <cerrno>
+#include <chrono>
+#include <condition_variable>
 #include <csignal>
 #include <cstdarg>
 #include <cstdio>
@@ -135,6 +137,25 @@ struct Shared
 
 Shared g_shared;
 std::atomic<bool> g_quit{false};
+
+// Browser requests for a capture this process reads back as zeros, waiting
+// for the app to send the bytes (see RELAY). Guarded by g_shared.mutex.
+struct RelayJob
+{
+    int client = -1; // the browser's socket; the head is already sent
+    std::string path;
+    std::uint64_t first = 0;
+    std::uint64_t last = 0;
+    std::int64_t queued = 0;
+};
+std::deque<RelayJob> g_relay;
+std::condition_variable g_relay_ready;
+
+// The app is running (its status poll said so): it can relay captures.
+bool app_present_locked()
+{
+    return g_shared.app_seen > now_seconds() - 15;
+}
 UploadProgress g_progress;
 
 // The build this copy is, for telling a newer pshared from an older one. The
@@ -199,6 +220,14 @@ int queue_manual(const std::string &destination, const std::string &path, std::s
     if (g_shared.manual.size() >= 500)
     {
         *error = "queue full";
+        return 0;
+    }
+    // Without the app to fetch it through (see fetch_through_app), the app
+    // reads it properly and sends it itself when this answers no.
+    if (!app_present_locked() && capture_reads_blank(path))
+    {
+        *error = "The background uploader can't read this clip right now; send it from PShare "
+                 "on the console";
         return 0;
     }
     ManualJob job;
@@ -319,6 +348,58 @@ std::string handle_command(std::string_view line)
     return "error unknown command\n";
 }
 
+// The app's end of the clip relay: wait a little for a browser request,
+// hand the app its range, and pass the bytes the app sends on to the browser.
+void relay_session(int app)
+{
+    socket_timeouts(app, 30000);
+    RelayJob job;
+    bool have = false;
+    {
+        std::unique_lock<std::mutex> lock(g_shared.mutex);
+        const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(4);
+        while (!g_quit.load())
+        {
+            // A browser that waited this long has given up.
+            while (!g_relay.empty() && g_relay.front().queued < now_seconds() - 20)
+            {
+                close(g_relay.front().client);
+                g_relay.pop_front();
+            }
+            if (!g_relay.empty())
+            {
+                job = g_relay.front();
+                g_relay.pop_front();
+                have = true;
+                break;
+            }
+            if (g_relay_ready.wait_until(lock, until) == std::cv_status::timeout)
+                break;
+        }
+    }
+    if (!have)
+    {
+        send_all(app, "none\n");
+        close(app);
+        return;
+    }
+    bool ok = send_all(app, std::to_string(job.first) + "\t" + std::to_string(job.last) + "\t" +
+                                job.path + "\n");
+    std::vector<char> buffer(256 * 1024);
+    std::uint64_t left = job.last - job.first + 1;
+    while (ok && left > 0 && !g_quit.load())
+    {
+        const ssize_t got = recv(app, buffer.data(), buffer.size(), 0);
+        if (got <= 0)
+            break;
+        ok = send_all(job.client, std::string_view(buffer.data(), static_cast<std::size_t>(got)));
+        left -= std::min<std::uint64_t>(left, static_cast<std::uint64_t>(got));
+    }
+    shutdown(job.client, SHUT_WR);
+    close(job.client);
+    close(app);
+}
+
 void control_thread(int listener)
 {
     while (!g_quit.load())
@@ -339,6 +420,11 @@ void control_thread(int listener)
             if (got <= 0)
                 break;
             line.append(buffer, static_cast<std::size_t>(got));
+        }
+        if (starts_with(line, "RELAY"))
+        {
+            std::thread(relay_session, client).detach();
+            continue;
         }
         if (!line.empty())
             send_all(client, handle_command(line.substr(0, line.find('\n'))));
@@ -414,6 +500,35 @@ void stream_file(int client, std::string path, std::string range, bool download)
                                           last, download ? item.file : std::string());
     if (size == 0)
         head = web_response(200, item.content_type(), "");
+    // Read back as zeros here (the console can do that to payloads after a
+    // restart) while the app reads it properly: the app sends the bytes.
+    if (size > 0 && capture_reads_blank(path))
+    {
+        bool relay = false;
+        {
+            std::lock_guard<std::mutex> lock(g_shared.mutex);
+            relay = app_present_locked();
+        }
+        if (!relay)
+        {
+            send_all(client, web_response(409, "text/plain",
+                                          "Open PShare on the console to play or download this "
+                                          "capture"));
+            close(file);
+            close(client);
+            return;
+        }
+        close(file);
+        if (!send_all(client, head))
+        {
+            close(client);
+            return;
+        }
+        std::lock_guard<std::mutex> lock(g_shared.mutex);
+        g_relay.push_back({client, path, first, last, now_seconds()});
+        g_relay_ready.notify_one();
+        return;
+    }
     bool ok = send_all(client, head);
     if (size > 0 && first > 0)
         ok = ok && lseek(file, static_cast<off_t>(first), SEEK_SET) == static_cast<off_t>(first);
@@ -520,12 +635,6 @@ WebReply serve(const Paths &paths, const WebRequest &request, TitleNames *names)
             reply.text = web_response(404, "text/plain", "Not a capture");
             return reply;
         }
-        if (capture_reads_blank(item.path))
-        {
-            reply.text = web_response(
-                409, "text/plain", "This capture reads back as empty (all zeros) on the console");
-            return reply;
-        }
         reply.stream_path = item.path;
         reply.download = request.query.count("dl") != 0;
         const auto range = request.headers.find("range");
@@ -556,7 +665,11 @@ WebReply serve(const Paths &paths, const WebRequest &request, TitleNames *names)
         info.item.when = capture.captured.date() + " " + capture.captured.time();
         info.item.size = human_size(capture.size);
         info.item.video = capture.video();
-        info.blank = capture_reads_blank(capture.path);
+        if (capture_reads_blank(capture.path))
+        {
+            std::lock_guard<std::mutex> lock(g_shared.mutex);
+            info.blank = !app_present_locked();
+        }
         const ScanResult scan = scan_media(paths, ScanOptions{});
         for (std::size_t i = 0; i < scan.items.size(); ++i)
             if (scan.items[i].path == capture.path)
@@ -821,6 +934,57 @@ void set_state(const char *state)
     g_shared.status.state = state;
 }
 
+// A capture this process reads back as zeros, fetched through the app's
+// relay into a temporary copy under /data/pshare/relay. False when the app is
+// not running or the copy came out short.
+bool fetch_through_app(const Paths &paths, const MediaItem &item, std::string *copy)
+{
+    {
+        std::lock_guard<std::mutex> lock(g_shared.mutex);
+        if (!app_present_locked() || item.size == 0)
+            return false;
+    }
+    int pair[2];
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, pair) != 0)
+        return false;
+    const std::string folder = paths.data_root + "/relay";
+    ensure_directory(folder);
+    const std::string target = folder + "/" + item.file;
+    const int out = ::open(target.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (out < 0)
+    {
+        close(pair[0]);
+        close(pair[1]);
+        return false;
+    }
+    {
+        std::lock_guard<std::mutex> lock(g_shared.mutex);
+        g_relay.push_back({pair[0], item.path, 0, item.size - 1, now_seconds()});
+        g_relay_ready.notify_one();
+    }
+    socket_timeouts(pair[1], 30000);
+    std::vector<char> buffer(256 * 1024);
+    std::uint64_t got_total = 0;
+    while (got_total < item.size && !g_quit.load())
+    {
+        const ssize_t got = recv(pair[1], buffer.data(), buffer.size(), 0);
+        if (got <= 0)
+            break;
+        if (::write(out, buffer.data(), static_cast<std::size_t>(got)) != got)
+            break;
+        got_total += static_cast<std::uint64_t>(got);
+    }
+    close(pair[1]);
+    close(out);
+    if (got_total != item.size)
+    {
+        ::unlink(target.c_str());
+        return false;
+    }
+    *copy = target;
+    return true;
+}
+
 // Sends one capture to `forced` (an id), or to the destination the config picks.
 // Returns the id it went to, empty when nothing was sent.
 std::string send_one(const Paths &paths, const Config &config, TitleNames *names, History *history,
@@ -854,7 +1018,14 @@ std::string send_one(const Paths &paths, const Config &config, TitleNames *names
     g_progress.cancel = false;
     g_log.write("sending %s (%s, %s) to %s", item.file.c_str(), game.c_str(),
                 human_size(item.size).c_str(), destination->id.c_str());
-    const UploadOutcome outcome = upload_capture(config, *destination, item, game, &g_progress);
+    // Read back as zeros here: send a copy the app hands over, when it runs.
+    MediaItem source = item;
+    std::string copy;
+    if (capture_reads_blank(item.path) && fetch_through_app(paths, item, &copy))
+        source.path = copy;
+    const UploadOutcome outcome = upload_capture(config, *destination, source, game, &g_progress);
+    if (!copy.empty())
+        ::unlink(copy.c_str());
     g_progress.sent = 0;
     g_progress.total = 0;
     if (result != nullptr)

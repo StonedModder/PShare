@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <cerrno>
 #include <ctime>
+#include <fcntl.h>
 #include <unistd.h>
 #include <map>
 
@@ -48,6 +49,8 @@ Model::~Model()
     io_thread_.join();
     upload_thread_.join();
     status_thread_.join();
+    for (Thread &relay : relay_threads_)
+        relay.join();
 }
 
 void Model::start()
@@ -61,7 +64,53 @@ void Model::start()
     io_thread_.start([this] { io_loop(); });
     upload_thread_.start([this] { upload_loop(); });
     status_thread_.start([this] { status_loop(); }, 256u << 10);
+    if (!environment_.demo)
+        for (Thread &relay : relay_threads_)
+            relay.start([this] { relay_loop(); }, 256u << 10);
     rescan();
+}
+
+// Since a console restart, payloads (pshared, an FTP server) can read video
+// captures back as zeros while the app reads them properly. While the app
+// runs, pshared asks it for the bytes a browser wants (net.hpp, relay_once).
+void Model::relay_loop()
+{
+    const std::string photo = environment_.paths.photo_root + "/";
+    const std::string video = environment_.paths.video_root + "/";
+    const auto read =
+        [&](const std::string &path, std::uint64_t first, std::uint64_t last, const RelaySend &send)
+    {
+        // Captures only, and nothing outside their folders.
+        if (path.find("/../") != std::string::npos ||
+            !(starts_with(path, photo) || starts_with(path, video)))
+            return false;
+        const int file = ::open(path.c_str(), O_RDONLY);
+        if (file < 0)
+            return false;
+        std::vector<char> buffer(256 * 1024);
+        std::uint64_t at = first;
+        bool ok = true;
+        while (ok && at <= last && !quit_.load())
+        {
+            const std::size_t want =
+                static_cast<std::size_t>(std::min<std::uint64_t>(buffer.size(), last - at + 1));
+            const ssize_t got = pread(file, buffer.data(), want, static_cast<off_t>(at));
+            if (got <= 0)
+                break;
+            ok = send(std::string_view(buffer.data(), static_cast<std::size_t>(got)));
+            at += static_cast<std::uint64_t>(got);
+        }
+        close(file);
+        return ok;
+    };
+    while (!quit_.load())
+    {
+        if (relay_once(4000, read))
+            continue;
+        // pshared is not running: look again in a moment.
+        for (int i = 0; i < 10 && !quit_.load(); ++i)
+            usleep(100000);
+    }
 }
 
 void Model::post(Result result)

@@ -285,6 +285,9 @@ class Model
     Thread io_thread_;
     Thread upload_thread_;
     Thread status_thread_;
+    // The clip relay: pshared asks the app for capture bytes it reads as zeros.
+    Thread relay_threads_[3];
+    void relay_loop();
 };
 
 } // namespace pshare::app

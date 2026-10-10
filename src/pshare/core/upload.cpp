@@ -344,8 +344,9 @@ UploadOutcome upload_capture_with(const Config &config, const Destination &desti
     {
         UploadOutcome blank;
         blank.destination = destination.id;
-        blank.error = "The console reads this capture back as empty (all zeros), so it was not "
-                      "sent";
+        blank.error = "The background uploader can't read this capture right now (the console "
+                      "hands it back as zeros), so it was not sent. Open PShare and send it "
+                      "again";
         return blank;
     }
     // A drive or a PC share: a file copy, no HTTP at all.

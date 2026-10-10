@@ -64,6 +64,7 @@ data asked for.
 | `CANCEL` | stop the current upload and drop the queue |
 | `SETUP on` / `SETUP off` | open the web page for 30 minutes, or close it |
 | `QUIT` | exit |
+| `RELAY` | the app's end of the clip relay (below): `none`, or `<first>\t<last>\t<path>` and then the app sends those bytes |
 
 ## Sending a capture
 
@@ -99,6 +100,21 @@ saved value).
 | `POST /send`, `/result?id=` | send from the browser, like `QUEUE` / `RESULT` |
 | `/file?p=<capture>` | the file itself, with `Range` support so clips stream; only paths under the capture folders |
 | `POST /save` | writes the settings form back to `config.ini` |
+
+## The clip relay
+
+After some console restarts, payloads (pshared, an FTP server) read video
+captures back as all zeros, while the app, a proper title elevated by Lapy,
+still reads them, as does the Media Gallery. Screenshots are not affected.
+While the app runs, three of its threads keep a `RELAY` request open on 9077.
+When pshared needs a capture it reads as zeros, it hands one of them the byte
+range and passes on what the app sends:
+
+* the browser page streams, seeks and downloads that way;
+* uploads, including automatic ones, fetch a temporary copy into
+  `/data/pshare/relay` first and delete it afterwards;
+* with the app closed, the page says to open PShare, and uploads are refused
+  rather than sending a file of zeros (`capture_reads_blank`).
 
 ## The clip player
 

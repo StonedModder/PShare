@@ -15,6 +15,7 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <string>
 #include <string_view>
 
@@ -52,6 +53,17 @@ bool daemon_command(std::string_view command, std::string *reply, int timeout_ms
                     int port = 0);
 // from_app: the app saying it is running (pshared keeps the browser pages up).
 DaemonStatus daemon_status(int port = 0, bool from_app = false);
+
+// The clip relay. Since a console restart can leave payloads reading video
+// captures back as zeros while the app still reads them properly, pshared can
+// ask the app for the bytes: the app calls relay_once() in a loop; pshared
+// answers within about `wait_ms` with "none" or with a range a browser is
+// waiting for, and `read` streams those bytes back through `send`. False when
+// pshared did not answer (not running).
+using RelaySend = std::function<bool(std::string_view)>;
+using RelayRead = std::function<bool(const std::string &path, std::uint64_t first,
+                                     std::uint64_t last, const RelaySend &send)>;
+bool relay_once(int wait_ms, const RelayRead &read, int port = 0);
 
 // The build marker pshared carries ("PSHARE_BUILD=<id>"); empty when none.
 std::string elf_build_id(std::string_view elf);
