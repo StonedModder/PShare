@@ -137,6 +137,11 @@ jobs:
       contents: write
 
     steps:
+      - name: Check out the release notes
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          sparse-checkout: .github/release-notes
+
       - name: Download the verified build
         env:
           GH_TOKEN: ${{ github.token }}
@@ -164,11 +169,14 @@ jobs:
           assets=(release/PPSA*.zip release/pshared.elf release/SHA256SUMS)
           # Create the release, or fill one written in advance that has no ZIP
           # yet; a ZIP that is already published is never replaced.
+          # Notes written for this version, when there are some.
+          notes=(--generate-notes)
+          [[ -f .github/release-notes/$TAG.md ]] && notes=(--notes-file ".github/release-notes/$TAG.md")
           if ! gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             gh release create "$TAG" "${assets[@]}" \
               --repo "$GITHUB_REPOSITORY" \
               --verify-tag \
-              --generate-notes \
+              "${notes[@]}" \
               --title "PShare $TAG"
             exit 0
           fi
