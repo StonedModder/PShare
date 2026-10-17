@@ -33,7 +33,9 @@ enum class Zone : std::uint8_t
 
 // [app] oldest_first: the sort order is remembered; the game filter is not.
 constexpr const char *kOldestFirstFlag = "oldest_first";
-constexpr float kButtonsX = 540.0f; // where the two buttons start, from the page's left
+constexpr float kButtonsX = 540.0f;  // where the two buttons start, from the page's left
+constexpr float kButtonsGap = 14.0f; // at least this far right of the tabs, which grow with
+                                     // their counts
 // Picker rows that are not a title ID.
 constexpr const char *kHeader = "\x01header";
 constexpr const char *kNewest = "\x01newest";
@@ -655,14 +657,16 @@ class CapturesPage final : public Page
     {
         const float h = 54.0f;
         const float y = area_.y + 3.0f;
+        const gfx::Rect last = tabs_.tab_rect(context.fonts, 2);
+        const float x = std::max(area_.x + kButtonsX, last.x + last.w + kButtonsGap);
         const float game_w =
             std::min(380.0f, context.fonts.semibold.measure(game_label(context), 22.0f) + 92.0f);
         if (which == 0)
-            return {area_.x + kButtonsX, y, game_w, h};
+            return {x, y, game_w, h};
         const float order_w =
             context.fonts.semibold.measure(oldest_first_ ? "Oldest first" : "Newest first", 22.0f) +
             92.0f;
-        return {area_.x + kButtonsX + game_w + 14.0f, y, order_w, h};
+        return {x + game_w + 14.0f, y, order_w, h};
     }
 
     void draw_buttons(ui::Canvas &scene, Context &context) const

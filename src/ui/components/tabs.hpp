@@ -16,7 +16,7 @@ namespace hui::ui
 struct TabItem
 {
     std::string label;
-    int badge = 0;         // a count after the label; 0 shows none, over 99 shows "99+"
+    int badge = 0;         // a count after the label; 0 shows none, over 999 shows "999+"
     bool disabled = false; // dimmed and skipped by the focus
     int tag = 0;           // yours
 };

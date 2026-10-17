@@ -19,6 +19,7 @@ namespace
 {
 
 constexpr float kBadgeGap = 10.0f;
+constexpr int kBadgeMax = 999; // the pill widens to its text, so three digits fit
 
 bool framed(SurfaceStyle style)
 {
@@ -29,8 +30,8 @@ bool framed(SurfaceStyle style)
 std::string badge_text(int count)
 {
     char text[8];
-    if (count > 99)
-        std::snprintf(text, sizeof(text), "99+");
+    if (count > kBadgeMax)
+        std::snprintf(text, sizeof(text), "%d+", kBadgeMax);
     else
         std::snprintf(text, sizeof(text), "%d", count);
     return text;
