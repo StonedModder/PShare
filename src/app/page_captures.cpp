@@ -697,6 +697,9 @@ class CapturesPage final : public Page
             }
             std::string label = which == 0 ? game_label(context)
                                            : (oldest_first_ ? "Oldest first" : "Newest first");
+            // The button stops growing at 380, so a long game name ends in an
+            // ellipsis before the arrow instead of running into the next one.
+            label = context.fonts.semibold.font->fit(label, 22.0f, r.w - 92.0f);
             ui::text(list, context.fonts.semibold, label, r.x + 52.0f, r.cy() + 8.0f, 22.0f, ink);
             list.triangle({r.x + r.w - 30.0f, r.cy() - 3.0f, 12.0f, 8.0f}, ink.with_alpha(0.7f),
                           0.0f, 3.1416f);
