@@ -47,6 +47,8 @@ const char *MediaItem::content_type() const
         return "image/png";
     if (ends_with_ci(file, ".jpg") || ends_with_ci(file, ".jpeg"))
         return "image/jpeg";
+    if (ends_with_ci(file, ".jxr"))
+        return "image/vnd.ms-photo";
     if (ends_with_ci(file, ".mp4"))
         return "video/mp4";
     if (ends_with_ci(file, ".webm"))
@@ -54,10 +56,22 @@ const char *MediaItem::content_type() const
     return "application/octet-stream";
 }
 
+bool MediaItem::jxr() const
+{
+    return ends_with_ci(file, ".jxr");
+}
+
+bool MediaItem::web_image() const
+{
+    return ends_with_ci(file, ".jpg") || ends_with_ci(file, ".jpeg") || ends_with_ci(file, ".png");
+}
+
 bool capture_kind(std::string_view file, MediaKind *kind)
 {
     MediaKind found;
-    if (ends_with_ci(file, ".jpg") || ends_with_ci(file, ".jpeg") || ends_with_ci(file, ".png"))
+    // .jxr: JPEG XR, what the PS5 saves HDR screenshots as.
+    if (ends_with_ci(file, ".jpg") || ends_with_ci(file, ".jpeg") || ends_with_ci(file, ".png") ||
+        ends_with_ci(file, ".jxr"))
         found = MediaKind::screenshot;
     else if (ends_with_ci(file, ".webm") || ends_with_ci(file, ".mp4"))
         found = MediaKind::video;
@@ -116,7 +130,14 @@ void walk(const std::string &folder, MediaKind kind, int depth, const ScanOption
         return;
     DIR *directory = opendir(folder.c_str());
     if (directory == nullptr)
+    {
+        if (depth > 0 && result->unreadable++ == 0)
+        {
+            result->unreadable_path = folder;
+            result->unreadable_errno = errno;
+        }
         return;
+    }
     ++result->folders;
     std::vector<std::string> folders;
     while (const dirent *entry = readdir(directory))
@@ -354,6 +375,58 @@ bool delete_capture(const std::string &path, const std::string &photo_root,
     // The console keeps each capture in a folder of its own.
     (void)::rmdir(path.substr(0, slash).c_str());
     return true;
+}
+
+bool add_pending_delete(const Paths &paths, const std::string &capture)
+{
+    const int file = ::open(paths.pending_deletes().c_str(), O_WRONLY | O_CREAT | O_APPEND, 0666);
+    if (file < 0)
+        return false;
+    const std::string line = capture + "\n";
+    const bool ok = ::write(file, line.data(), line.size()) == static_cast<ssize_t>(line.size());
+    ::close(file);
+    return ok;
+}
+
+int delete_pending_captures(const Paths &paths)
+{
+    const std::string list = paths.pending_deletes();
+    const std::string taken = list + ".taking";
+    // A list left over from an interrupted run comes first.
+    struct stat info
+    {
+    };
+    if (::stat(taken.c_str(), &info) != 0 && ::rename(list.c_str(), taken.c_str()) != 0)
+        return 0;
+    std::string text;
+    {
+        const int file = ::open(taken.c_str(), O_RDONLY);
+        if (file < 0)
+            return 0;
+        char buffer[4096];
+        ssize_t got = 0;
+        while ((got = ::read(file, buffer, sizeof(buffer))) > 0)
+            text.append(buffer, static_cast<std::size_t>(got));
+        ::close(file);
+    }
+    int deleted = 0;
+    for (const std::string &line : split(text, '\n'))
+    {
+        const std::string path(trim(line));
+        if (path.empty())
+            continue;
+        struct stat left
+        {
+        };
+        const bool capture =
+            starts_with(path, paths.photo_root + "/") || starts_with(path, paths.video_root + "/");
+        if (delete_capture(path, paths.photo_root, paths.video_root, nullptr))
+            ++deleted;
+        else if (capture && ::stat(path.c_str(), &left) == 0)
+            (void)add_pending_delete(paths, path); // still there: tried again next time
+    }
+    ::unlink(taken.c_str());
+    return deleted;
 }
 
 // ---- game names ------------------------------------------------------------

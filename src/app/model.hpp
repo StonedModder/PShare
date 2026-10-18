@@ -67,7 +67,9 @@ struct UploadJob
     std::string destination_name;
     bool video = false;
     std::uint64_t size = 0;
-    bool background = false; // hand it to pshared (it goes on after the app closes)
+    bool background = false;   // hand it to pshared (it goes on after the app closes)
+    bool delete_after = false; // delete the capture from the console once it is sent
+    bool batch = false;        // one of a "Send all": no toast of its own
 };
 
 struct UploadView
@@ -78,6 +80,11 @@ struct UploadView
     std::uint64_t total = 0;
     int stage = 0; // UploadProgress::stage
     int queued = 0;
+    // A "Send all" in progress: how far, and where to.
+    bool batch = false;
+    int batch_done = 0;
+    int batch_total = 0;
+    std::string batch_destination;
 };
 
 enum class EventKind : std::uint8_t
@@ -89,8 +96,10 @@ enum class EventKind : std::uint8_t
     daemon_stopped,
     config_saved,
     config_failed,
-    unreadable, // captures that read back as zeros were found (unreadable_unasked())
-    deleted,    // delete_captures() finished: ok, title, detail
+    unreadable,     // captures that read back as zeros were found (unreadable_unasked())
+    deleted,        // delete_captures() finished: ok, title, detail
+    batch_finished, // a send_batch() ended: ok (all sent), title, detail
+    delete_asked,   // a browser asks to delete captures: delete_request(), then answer it
     note,
 };
 
@@ -168,6 +177,16 @@ class Model
     void mark_unreadable_asked(const std::vector<std::string> &paths);
     // Deletes them (and the files beside them), then rescans; posts EventKind::deleted.
     void delete_captures(std::vector<std::string> paths);
+    // Deletes what pshared sent with "delete once sent" but was not allowed to
+    // delete itself (Paths::pending_deletes); posts EventKind::deleted when any went.
+    void delete_pending();
+    // A browser asked to delete these (the gallery page). Nothing goes until
+    // the player says so on the console: answer_delete_request(true).
+    const std::vector<std::string> &delete_request() const
+    {
+        return delete_request_;
+    }
+    void answer_delete_request(bool allow);
 
     // ---- configuration ----
     const Config &config() const
@@ -192,6 +211,17 @@ class Model
     // Queues a capture for `destination` (empty: the one the config picks).
     // Returns false with a reason when it cannot be queued.
     bool upload(const std::string &path, const std::string &destination, std::string *why);
+    // "Send all": `paths` to `destination` (empty: each game's usual one),
+    // each deleted from the console once it is sent when `delete_after`. Handed
+    // to pshared in one go, so it finishes after the app closes; sent by the
+    // app itself when pshared cannot run. Returns how many it took (0 with a
+    // reason when none); EventKind::batch_finished follows.
+    int send_batch(const std::vector<std::string> &paths, const std::string &destination,
+                   bool delete_after, std::string *why);
+    bool batch_active() const
+    {
+        return batch_.active;
+    }
     void cancel_upload();
     UploadView upload_view() const;
 
@@ -243,6 +273,13 @@ class Model
     // Sends `job` through pshared. False when pshared could not take it (the
     // app then sends it itself); otherwise `outcome` is pshared's answer.
     bool send_through_daemon(const UploadJob &job, UploadOutcome *outcome);
+    // A job for the app's upload thread; upload() and the batch fallback use it.
+    bool queue_job(const Capture &capture, const Destination &destination, bool delete_after,
+                   bool batch, std::string *why);
+    // The batch's captures go to the app's own queue (pshared cannot take them).
+    void batch_by_app(const std::vector<std::string> &paths);
+    // How the batch went, from the history; then the event.
+    void finish_batch(const std::string &note);
 
     Environment environment_;
     Config config_;
@@ -262,6 +299,26 @@ class Model
     int clip_count_ = 0;
     bool daemon_starting_ = false;
     std::vector<ModelEvent> events_;
+    // The "Send all" in progress (the main thread's).
+    struct Batch
+    {
+        bool active = false;
+        bool by_app = false; // in the app's own queue, not pshared's
+        std::vector<std::string> paths;
+        std::string destination; // id; empty: each game's usual one
+        std::string destination_name;
+        bool delete_after = false;
+        std::int64_t started = 0;
+        int first_id = 0; // pshared's QUEUE numbers, once handed over
+        int last_id = 0;
+        bool daemon_done = false; // pshared has answered for its last one
+        int done = 0;
+    } batch_;
+    std::vector<std::string> delete_request_; // asked on the console now
+    bool delete_request_busy_ = false;        // being fetched or asked
+    void fetch_delete_request();
+    // Batch jobs still in the app's own queue (or being sent by it).
+    bool app_batch_pending() const;
 
     // ---- shared with the workers ----
     mutable Mutex mutex_;
@@ -275,6 +332,7 @@ class Model
     bool uploading_ = false;
     std::atomic<bool> quit_{false};
     std::atomic<bool> poll_daemon_{true};
+    std::atomic<int> batch_last_{0}; // the status thread watches this QUEUE number finish
     std::atomic<bool> demo_daemon_running_{false};
     std::atomic<bool> demo_daemon_paused_{false};
     std::atomic<bool> demo_setup_{false};

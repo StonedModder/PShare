@@ -214,15 +214,18 @@ class AutoPage final : public Page
             line = "For " + friendly_duration(context.now - daemon.started) + ", version " +
                    daemon.version;
         else if (!running)
-            line = "New captures are not sent by themselves";
-        ui::text(list, scene.fonts.regular, line, x, hero_.y + 152.0f, 22.0f, rgb(palette::mist));
+            line = "New captures stay on the console";
+        // Within the panel: a long uptime or a wide font must not run into the form.
+        const float room = hero_.x + hero_.w - 36.0f - x;
+        ui::text(list, scene.fonts.regular, scene.fonts.regular.font->fit(line, 22.0f, room), x,
+                 hero_.y + 152.0f, 22.0f, rgb(palette::mist));
         const char *explain =
             running ? "It keeps going after you close PShare, until the console restarts, "
                       "and sends each new screenshot and clip as soon as it is saved."
                     : "Turn it on and every new screenshot and clip is sent as soon as it is "
                       "saved, even after you close PShare.";
-        ui::paragraph(list, scene.fonts.regular, explain, x, hero_.y + 200.0f, 21.0f,
-                      hero_.x + hero_.w - 36.0f - x, 30.0f, rgb(palette::cream, 0.86f), 4);
+        ui::paragraph(list, scene.fonts.regular, explain, x, hero_.y + 200.0f, 21.0f, room, 30.0f,
+                      rgb(palette::cream, 0.86f), 4);
 
         sent_.draw(scene);
         failed_.draw(scene);

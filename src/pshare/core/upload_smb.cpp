@@ -1,4 +1,4 @@
-// PShare - Copying a capture to a shared folder on a PC (SMB 2/3, libsmb2).
+// PShare - Copying a capture to a shared folder on a PC or Mac (SMB 2/3, libsmb2).
 // Copyright (C) 2026 PShare contributors
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
@@ -186,7 +186,7 @@ UploadOutcome copy_to_share(const Destination &destination, const MediaItem &, c
 {
     UploadOutcome outcome;
     outcome.destination = destination.id;
-    outcome.error = "PC shares need a console build (libsmb2)";
+    outcome.error = "PC and Mac shares need a console build (libsmb2)";
     return outcome;
 }
 

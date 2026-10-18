@@ -23,6 +23,12 @@ while IFS= read -r -d '' source; do
     sources+=("$source")
 done < <(find "$root/src/pshare/core" -name '*.cpp' -print0 | sort -z)
 c_sources=("$root/src/third_party/stb_image/stb_image.c" "$root/src/third_party/stb_image/stb_image_write.c")
+while IFS= read -r -d '' source; do
+    c_sources+=("$source")
+done < <(find "$root/src/third_party/jxrlib" -name '*.c' -print0 | sort -z)
+# jxrlib's own headers, for its wrappers (src/third_party/jxrlib).
+jxr_includes=(-I"$root/third_party/jxrlib" -I"$root/third_party/jxrlib/common/include"
+    -I"$root/third_party/jxrlib/image/sys" -I"$root/third_party/jxrlib/jxrgluelib")
 
 objects=()
 for source in "${sources[@]}"; do
@@ -38,7 +44,7 @@ for source in "${c_sources[@]}"; do
     object="$build/obj/${relative//\//_}.o"
     ninja_inputs=("$source" "$cc")
     ninja_edge CC "$object" "${compiler_cache[@]}" "$cc" -std=c11 -O2 -w \
-        -I"$root/src" -MD -MF "$object.d" -c "$source" -o "$object"
+        -I"$root/src" "${jxr_includes[@]}" -MD -MF "$object.d" -c "$source" -o "$object"
     objects+=("$object")
 done
 ninja_inputs=("${objects[@]}" "$cxx")

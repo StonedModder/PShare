@@ -13,11 +13,13 @@
 #include "pshare/core/local_copy.hpp"
 #include "pshare/core/media.hpp"
 #include "pshare/core/net.hpp"
+#include "pshare/core/picture.hpp"
 #include "pshare/core/setup_web.hpp"
 #include "pshare/core/text.hpp"
 #include "pshare/core/upload.hpp"
 #include "pshare/core/watcher.hpp"
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <ctime>
@@ -91,6 +93,14 @@ void write_file(const std::string &path, const std::string &text)
         return;
     std::fwrite(text.data(), 1, text.size(), file);
     std::fclose(file);
+}
+
+std::uint64_t file_size_of(const std::string &path)
+{
+    struct stat info
+    {
+    };
+    return stat(path.c_str(), &info) == 0 ? static_cast<std::uint64_t>(info.st_size) : 0;
 }
 
 MediaItem sample_item(const std::string &path, std::uint64_t size)
@@ -176,7 +186,8 @@ TEST(default_config_loads)
     CHECK(config.find("catbox") != nullptr);
     CHECK_EQ(config.default_destination, "discord");
     CHECK_EQ(config.find("discord")->fallback, "catbox");
-    CHECK_EQ(config.find("discord")->max_mb, 10);
+    CHECK_EQ(config.find("discord")->max_mb, 20);
+    CHECK(config.find("mac") != nullptr && config.find("mac")->type == DestinationType::smb);
     // Discord has no webhook yet: the first configured one (catbox) is used.
     const Destination *chosen = config.destination_for("PPSA01234");
     CHECK(chosen != nullptr && chosen->id == "catbox");
@@ -371,6 +382,58 @@ TEST(watcher_waits_for_files_to_settle)
     CHECK_EQ(again.since(), start);
 }
 
+TEST(watcher_takes_new_captures_whatever_their_date)
+{
+    // Issue #2: a new screenshot whose file is dated hours before the console's
+    // clock (local time written as UTC) was taken for the back catalogue.
+    Paths paths;
+    paths.data_root = scratch() + "/watch2/data";
+    paths.photo_root = scratch() + "/watch2/photo";
+    paths.video_root = scratch() + "/watch2/video";
+    ensure_directory(paths.photo_root + "/PPSA01234/a");
+    const std::int64_t start = static_cast<std::int64_t>(std::time(nullptr));
+    const auto dated = [](const std::string &path, std::int64_t when)
+    {
+        struct timespec times[2];
+        times[0].tv_sec = times[1].tv_sec = static_cast<time_t>(when);
+        times[0].tv_nsec = times[1].tv_nsec = 0;
+        utimensat(0, path.c_str(), times, 0);
+    };
+    const std::string old = paths.photo_root + "/PPSA01234/a/20250101_000000_00000001.jpg";
+    write_file(old, "old");
+    dated(old, start - 3600); // an hour ago, but there before watching began
+    Config config;
+    config.settle_seconds = 1;
+    Watcher watcher(paths);
+    watcher.configure(config);
+    watcher.load(start);
+    CHECK(watcher.poll(start).empty());
+    CHECK(watcher.seen(old));
+    // New, but dated 5 hours back.
+    const std::string shot = paths.photo_root + "/PPSA01234/a/20261013_151530_00000002.jpg";
+    write_file(shot, "new");
+    dated(shot, start - 5 * 3600);
+    CHECK(watcher.poll(start + 10).empty()); // noticed
+    CHECK(!watcher.seen(shot));
+    CHECK_EQ(watcher.poll(start + 12).size(), 1u);
+    // One turning up dated weeks before watching began is still the back catalogue.
+    const std::string ancient = paths.photo_root + "/PPSA01234/a/20250901_000000_00000003.jpg";
+    write_file(ancient, "ancient");
+    dated(ancient, start - 30 * 24 * 3600);
+    watcher.poll(start + 20);
+    CHECK(watcher.seen(ancient));
+    // A folder the scan cannot open is reported.
+    ensure_directory(paths.photo_root + "/PPSA05678/locked");
+    chmod((paths.photo_root + "/PPSA05678/locked").c_str(), 0);
+    watcher.poll(start + 30);
+    if (geteuid() != 0) // root opens it anyway
+    {
+        CHECK_EQ(watcher.last_scan_problems().unreadable, 1);
+        CHECK(ends_with_ci(watcher.last_scan_problems().unreadable_path, "/locked"));
+    }
+    chmod((paths.photo_root + "/PPSA05678/locked").c_str(), 0755);
+}
+
 TEST(watcher_seen_list_text)
 {
     Paths paths;
@@ -403,6 +466,155 @@ const FormPart *part(const HttpRequest &request, const std::string &name)
         if (each.name == name)
             return &each;
     return nullptr;
+}
+
+// A 64 x 4 grey ramp in the PS5's HDR screenshot format (JPEG XR,
+// 32bppRGB101010, PQ codes 0, 16, ... 1008 left to right), written losslessly
+// by jxrlib's own encoder.
+const unsigned char kHdrRamp[] = {
+    0x49, 0x49, 0xbc, 0x01, 0x20, 0x00, 0x00, 0x00, 0x24, 0xc3, 0xdd, 0x6f, 0x03, 0x4e, 0xfe, 0x4b,
+    0xb1, 0x85, 0x3d, 0x77, 0x76, 0x8d, 0xc9, 0x14, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x08, 0x00, 0x01, 0xbc, 0x01, 0x00, 0x10, 0x00, 0x00, 0x00, 0x08, 0x00, 0x00, 0x00, 0x02, 0xbc,
+    0x04, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80, 0xbc, 0x04, 0x00, 0x01, 0x00,
+    0x00, 0x00, 0x40, 0x00, 0x00, 0x00, 0x81, 0xbc, 0x04, 0x00, 0x01, 0x00, 0x00, 0x00, 0x04, 0x00,
+    0x00, 0x00, 0x82, 0xbc, 0x0b, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0xc0, 0x42, 0x83, 0xbc,
+    0x0b, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0xc0, 0x42, 0xc0, 0xbc, 0x04, 0x00, 0x01, 0x00,
+    0x00, 0x00, 0x86, 0x00, 0x00, 0x00, 0xc1, 0xbc, 0x04, 0x00, 0x01, 0x00, 0x00, 0x00, 0x28, 0x02,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x57, 0x4d, 0x50, 0x48, 0x4f, 0x54, 0x4f, 0x00, 0x11, 0x45,
+    0xc0, 0x79, 0x00, 0x3f, 0x00, 0x03, 0x60, 0x00, 0xc0, 0x00, 0x00, 0x0c, 0x00, 0x00, 0x00, 0xc0,
+    0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x13, 0x00, 0x70, 0x01, 0xb4, 0xff, 0x00, 0x00,
+    0x01, 0x01, 0xc1, 0xe9, 0x40, 0x00, 0x32, 0x41, 0x00, 0x00, 0x75, 0xec, 0x00, 0x0d, 0x60, 0xe0,
+    0x00, 0x00, 0x00, 0x01, 0x02, 0x21, 0x84, 0x5b, 0x79, 0x04, 0x82, 0x48, 0x48, 0x9a, 0x04, 0x24,
+    0x89, 0x40, 0xe0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x43, 0x08, 0xae, 0x10, 0xf1, 0xa8, 0x5a, 0x21, 0x81, 0x06, 0x21, 0xc0, 0x86, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x0c, 0x24, 0xcc, 0x21, 0x10,
+    0x01, 0x00, 0x04, 0x64, 0x78, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0x61, 0x27,
+    0x08, 0x94, 0x23, 0x08, 0x3c, 0x3c, 0x45, 0xa3, 0xa1, 0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x01, 0x03, 0x07, 0x85, 0x91, 0xc2, 0x0a, 0x30, 0x02, 0x46, 0x28, 0xc7, 0x1c, 0x32, 0x0c, 0xc3,
+    0x20, 0xe1, 0x73, 0x3f, 0x92, 0xa9, 0x00, 0x99, 0x88, 0xcf, 0x16, 0x09, 0x7e, 0x2d, 0x1a, 0x21,
+    0x0a, 0x49, 0x9a, 0xc6, 0xc0, 0x90, 0x0d, 0xb0, 0xd1, 0x01, 0xa3, 0x27, 0x4c, 0xb1, 0x41, 0x2e,
+    0xa0, 0x80, 0x41, 0x97, 0x4c, 0xd2, 0xa6, 0x59, 0xc1, 0x12, 0x80, 0x9c, 0x1d, 0xa2, 0x30, 0xdd,
+    0xdf, 0x43, 0xa6, 0x28, 0x94, 0xd7, 0x3b, 0x0d, 0x19, 0x86, 0x51, 0x61, 0x71, 0x18, 0x45, 0x11,
+    0x86, 0x8c, 0x51, 0xf1, 0xd3, 0x68, 0x0c, 0x60, 0x0c, 0xc9, 0x19, 0x3d, 0x01, 0x1d, 0x8d, 0x9b,
+    0xeb, 0x02, 0x1a, 0x30, 0x06, 0x48, 0x92, 0x2c, 0xfc, 0x88, 0x38, 0x0c, 0x18, 0x01, 0x94, 0x75,
+    0x11, 0x4f, 0xa2, 0x22, 0x62, 0xf4, 0xe0, 0x0a, 0x5a, 0xaa, 0x62, 0x93, 0x2c, 0x1a, 0x50, 0x01,
+    0x99, 0xa7, 0x2d, 0x19, 0x78, 0x1d, 0x85, 0xa8, 0x38, 0x1f, 0x11, 0xb4, 0xe0, 0x1a, 0x5a, 0xd6,
+    0x94, 0xad, 0x2e, 0x44, 0x50, 0x0d, 0x24, 0x55, 0x2c, 0x8c, 0x88, 0x38, 0x14, 0xa1, 0x46, 0xf0,
+    0x2d, 0x42, 0xac, 0x25, 0x07, 0x4c, 0x18, 0x0b, 0xa0, 0x29, 0x5a, 0x86, 0xb8, 0x88, 0x41, 0x80,
+    0xaa, 0x02, 0x99, 0xb8, 0x5b, 0xc4, 0x46, 0x63, 0x59, 0xac, 0x25, 0x30, 0x37, 0x47, 0xa6, 0x6a,
+    0x12, 0xe8, 0x4c, 0x83, 0x02, 0x54, 0x7a, 0x5a, 0xb8, 0x5b, 0xc8, 0x8a, 0xe9, 0xe5, 0x96, 0x31,
+    0x13, 0x9b, 0x21, 0xd1, 0x84, 0x39, 0xb2, 0x1d, 0x65, 0x64, 0x1b, 0x2a, 0x29, 0x21, 0x0e, 0x2b,
+    0x21, 0xc9, 0x0a, 0x71, 0x5c, 0x87, 0x59, 0x65, 0x43, 0xca, 0x28, 0xa7, 0x89, 0x71, 0x93, 0xf2,
+    0xa8, 0x9c, 0x4b, 0x19, 0x4a, 0x6a, 0x8a, 0x29, 0x62, 0xd8, 0xc8, 0x52, 0xa8, 0x9c, 0x5b, 0x19,
+    0x0a, 0x55, 0x12, 0x79, 0x05, 0xa5, 0x88, 0xa9, 0xea, 0x1c, 0x3e, 0x91, 0x13, 0xd4, 0x3b, 0x94,
+    0x57, 0x29, 0x68, 0x52, 0xd0, 0xbe, 0x7a, 0x87, 0x71, 0x69, 0x25, 0x18, 0x4b, 0xf6, 0x33, 0x5d,
+    0x78, 0x79, 0x4a, 0x87, 0xc5, 0xd1, 0xa5, 0x2c, 0x5b, 0x19, 0x52, 0xb5, 0x15, 0x8b, 0x71, 0x95,
+    0x2d, 0xa8, 0xa2, 0x96, 0x2d, 0x8c, 0xac, 0xc6, 0xc5, 0x66, 0xe7, 0x7a, 0x95, 0x9c, 0xd7, 0x4d,
+    0x5c, 0x00, 0x00, 0x00, 0x01, 0x04, 0x14, 0xc2, 0x66, 0x23, 0x83, 0xaa, 0x33, 0x1d, 0x06, 0x79,
+    0x9e, 0x70, 0x48, 0x54, 0x75, 0x46, 0x62, 0x02, 0x03, 0x48, 0x4c, 0x34, 0x09, 0x8d, 0x40, 0x08,
+    0x00, 0x0d, 0x21, 0x30, 0x00, 0x19, 0xbc, 0x50, 0x68, 0x53, 0x25, 0x95, 0xca, 0x50, 0x22, 0x02,
+    0x07, 0x5c, 0x66, 0x27, 0x8a, 0xdc, 0xd9, 0x84, 0x51, 0x01, 0xa0, 0x56, 0x00, 0x00, 0x34, 0x84,
+    0xc4, 0x05, 0x32, 0x2c, 0x80, 0x08, 0x00, 0xd0, 0x2b, 0xc8, 0xe2, 0x87, 0x73, 0xc0,
+};
+
+TEST(hdr_screenshots_are_tone_mapped)
+{
+    const std::string bytes(reinterpret_cast<const char *>(kHdrRamp), sizeof(kHdrRamp));
+    Picture picture;
+    CHECK(decode_picture_bytes(bytes, 9999, 9999, &picture));
+    CHECK_EQ(picture.width, 64);
+    CHECK_EQ(picture.height, 4);
+    if (picture.width != 64 || picture.height != 4)
+        return;
+    const auto at = [&](int x, int c) { return picture.rgba[static_cast<std::size_t>(x) * 4 + c]; };
+    CHECK_EQ(at(0, 0), 0);                     // code 0: black
+    CHECK(at(20, 0) > 60 && at(20, 0) < 95);   // code 320: a dark grey, left as it is
+    CHECK(at(37, 0) > 230 && at(37, 0) < 252); // code 592, about 203 nits: reference white
+    CHECK(at(41, 0) > at(37, 0));              // brighter still: detail, not clipped
+    CHECK(at(63, 0) >= 250);                   // the brightest: near white, not wrapped round
+    for (int x = 1; x < 64; ++x)
+    {
+        CHECK(at(x, 0) >= at(x - 1, 0));                     // never darker to the right
+        CHECK(at(x, 0) == at(x, 1) && at(x, 1) == at(x, 2)); // grey stays grey
+        CHECK_EQ(at(x, 3), 255);                             // opaque
+    }
+    // Cut short: jxrlib fills in what is missing (the sanitizers check it reads
+    // nothing past the end). Not JPEG XR at all: refused.
+    (void)decode_picture_bytes(bytes.substr(0, 300), 64, 64, &picture);
+    CHECK(!decode_picture_bytes(bytes.substr(0, 3), 64, 64, &picture));
+}
+
+HttpResult record_request(const HttpRequest &request, UploadProgress *, void *user)
+{
+    static_cast<std::vector<HttpRequest> *>(user)->push_back(request);
+    HttpResult result;
+    result.transport_ok = true;
+    result.status = 200;
+    result.body = R"({"ok":true,"attachments":[]})";
+    return result;
+}
+
+TEST(hdr_screenshots_are_found_and_shown)
+{
+    // The PS5 saves HDR screenshots as JPEG XR (.jxr), beside .dat and .meta.
+    const std::string root = scratch() + "/jxr";
+    const std::string folder = root + "/photo/NPXS40087/PPSA21564/2b3";
+    ensure_directory(folder);
+    ensure_directory(root + "/video");
+    const std::string shot = folder + "/20261018_162130_00868499.jxr";
+    CHECK(write_text_file_atomic(
+        shot, std::string(reinterpret_cast<const char *>(kHdrRamp), sizeof(kHdrRamp))));
+    write_file(folder + "/20261018_162130_00868499.dat", "d");
+    write_file(folder + "/20261018_162130_00868499.meta", "m");
+    Paths paths;
+    paths.photo_root = root + "/photo";
+    paths.video_root = root + "/video";
+    const ScanResult scan = scan_media(paths, ScanOptions{});
+    CHECK_EQ(scan.items.size(), 1u);
+    if (scan.items.size() != 1)
+        return;
+    const MediaItem &item = scan.items[0];
+    CHECK(!item.video() && !item.web_image() && item.jxr());
+    CHECK_EQ(std::string(item.content_type()), "image/vnd.ms-photo");
+    CHECK_EQ(item.title_id, "PPSA21564");
+
+    // Telegram: a photo copy, then the original as a file.
+    const Config config = ready_config();
+    const Destination &telegram = *config.find("telegram");
+    CHECK(needs_photo_copy(telegram, item));
+    CHECK(album_kind(telegram, item) == AlbumKind::photo);
+    std::vector<HttpRequest> sent;
+    UploadOutcome outcome =
+        upload_capture_with(config, telegram, item, "Game", nullptr, record_request, &sent, false);
+    CHECK(outcome.ok);
+    CHECK_EQ(sent.size(), 2u);
+    if (sent.size() == 2)
+    {
+        CHECK(sent[0].url.find("/sendPhoto") != std::string::npos);
+        CHECK(sent[1].url.find("/sendDocument") != std::string::npos);
+    }
+
+    // Discord: one post with the JPEG to look at and the original attached.
+    sent.clear();
+    outcome = upload_capture_with(config, *config.find("discord"), item, "Game", nullptr,
+                                  record_request, &sent, false);
+    CHECK(outcome.ok);
+    CHECK_EQ(sent.size(), 1u);
+    if (sent.size() == 1)
+    {
+        const FormPart *copy = part(sent[0], "files[0]");
+        const FormPart *original = part(sent[0], "files[1]");
+        CHECK(copy != nullptr && ends_with_ci(copy->file_name, ".jpg") &&
+              copy->content_type == std::string("image/jpeg"));
+        CHECK(original != nullptr && original->file_path == item.path);
+    }
+
+    // The browser asks the uploader for a JPEG of it.
+    GalleryItem card;
+    card.path = item.path;
+    card.picture = item.web_image();
+    card.hdr = item.jxr();
+    CHECK(gallery_page({card}, 0, 1, {}, {}).find("&amp;jpeg=480") != std::string::npos);
 }
 
 TEST(plans_per_destination)
@@ -463,11 +675,27 @@ TEST(reads_answers)
     CHECK(v.ok && v.link == "https://h/1");
     v = read_response(DestinationType::http, 503, "busy");
     CHECK(!v.ok && v.retry);
+    // Rate limits say how long to wait: Telegram in whole seconds, Discord in fractions.
+    v = read_response(DestinationType::telegram, 429,
+                      R"({"ok":false,"error_code":429,"description":"Too Many Requests: retry )"
+                      R"(after 35","parameters":{"retry_after":35}})");
+    CHECK(!v.ok && v.retry && v.retry_after == 36);
+    v = read_response(
+        DestinationType::discord, 429,
+        R"({"message":"You are being rate limited.","retry_after":1.5,"global":false})");
+    CHECK(v.retry && v.retry_after == 2);
+    v = read_response(DestinationType::discord, 500, R"({"retry_after":9})");
+    CHECK(v.retry && v.retry_after == 0);
+    double number = 0.0;
+    CHECK(json_find_number(R"({"a":"x","n":12.25})", "n", &number) && number == 12.25);
+    CHECK(!json_find_number(R"({"n":"12"})", "n", &number));
 }
 
 struct FakeServer
 {
     std::vector<std::string> urls;
+    std::vector<std::string> captions; // Telegram's
+
     int failures_left = 0;
 };
 
@@ -475,6 +703,9 @@ HttpResult fake_transport(const HttpRequest &request, UploadProgress *, void *us
 {
     FakeServer *server = static_cast<FakeServer *>(user);
     server->urls.push_back(request.url);
+    for (const FormPart &each : request.parts)
+        if (each.name == "caption")
+            server->captions.push_back(each.value);
     HttpResult result;
     result.transport_ok = true;
     if (server->failures_left > 0)
@@ -486,9 +717,135 @@ HttpResult fake_transport(const HttpRequest &request, UploadProgress *, void *us
     result.status = 200;
     if (request.url.find("catbox") != std::string::npos)
         result.body = "https://files.catbox.moe/big.webm";
+    else if (request.url.find("api.telegram.org") != std::string::npos)
+        result.body = R"({"ok":true,"result":[]})";
     else
         result.body = R"({"attachments":[]})";
     return result;
+}
+
+TEST(telegram_albums)
+{
+    Config config = ready_config();
+    const Destination &telegram = *config.find("telegram");
+    std::vector<MediaItem> shots;
+    for (int i = 1; i <= 3; ++i)
+        shots.push_back(sample_item("/p/PS5/PPSA01234/20261009_18350" + std::to_string(i) +
+                                        "_0000000" + std::to_string(i) + ".jpg",
+                                    1000));
+    const MediaItem clip = sample_item("/v/PS5/PPSA01234/20261009_183501_00000002.webm", 1000);
+    CHECK(album_kind(telegram, shots[0]) == AlbumKind::photo);
+    CHECK(album_kind(telegram, clip) == AlbumKind::file);
+    const MediaItem big_shot = sample_item(shots[0].path, 11ull << 20); // a 4K PNG, say
+    CHECK(album_kind(telegram, big_shot) == AlbumKind::photo); // as a photo copy + the file
+    CHECK(needs_photo_copy(telegram, big_shot) && !needs_photo_copy(telegram, shots[0]));
+    CHECK(album_kind(telegram, sample_item(clip.path, 60ull << 20)) == AlbumKind::none);
+    CHECK(album_kind(*config.find("discord"), shots[0]) == AlbumKind::none);
+
+    std::vector<CaptionInfo> captions;
+    for (const MediaItem &shot : shots)
+        captions.push_back(caption_info(shot, "Astro"));
+    HttpRequest request;
+    std::string error;
+    CHECK(plan_album(telegram, AlbumKind::photo, shots, captions, &request, &error));
+    CHECK_EQ(request.url, "https://api.telegram.org/bot123:abc/sendMediaGroup");
+    CHECK_EQ(request.upload_size, 3000u);
+    const FormPart *media = part(request, "media");
+    CHECK(media != nullptr);
+    if (media != nullptr)
+    {
+        CHECK(media->value.find(R"({"type":"photo","media":"attach://p0","caption":"Screenshot )"
+                                R"(from Astro)") != std::string::npos);
+        CHECK(media->value.find("attach://p2") != std::string::npos);
+    }
+    CHECK(part(request, "p2") != nullptr && part(request, "p2")->is_file());
+    CHECK(part(request, "chat_id")->value == "-100");
+    CHECK(!plan_album(telegram, AlbumKind::photo, {shots[0]}, {captions[0]}, &request, &error));
+    CHECK(!plan_album(telegram, AlbumKind::photo, {shots[0], clip}, {captions[0], captions[0]},
+                      &request, &error));
+    CHECK(!plan_album(telegram, AlbumKind::photo, {big_shot, shots[0]}, {captions[0], captions[0]},
+                      &request, &error)); // too big to be a photo
+    // Files go in albums of their own: full-size screenshots and clips.
+    CHECK(plan_album(telegram, AlbumKind::file, {big_shot, clip}, {captions[0], captions[0]},
+                     &request, &error));
+    CHECK(part(request, "media") != nullptr &&
+          part(request, "media")->value.find(R"("type":"document")") != std::string::npos);
+    const MediaItem huge = sample_item(clip.path, 45ull << 20);
+    CHECK(!plan_album(telegram, AlbumKind::file, {huge, big_shot}, {captions[0], captions[0]},
+                      &request, &error)); // over 50 MB together
+
+    FakeServer server;
+    const UploadOutcome outcome = upload_album_with(config, telegram, shots, {"Astro"}, nullptr,
+                                                    fake_transport, &server, false);
+    CHECK(outcome.ok);
+    CHECK_EQ(server.urls.size(), 1u);
+}
+
+TEST(big_screenshots_go_to_telegram_as_a_photo_and_a_file)
+{
+    // A 4000 x 2500 screenshot of noise: well over Telegram's 10 MB for a photo.
+    Picture noise;
+    noise.width = 4000;
+    noise.height = 2500;
+    noise.rgba.resize(static_cast<std::size_t>(noise.width) * noise.height * 4);
+    std::uint32_t seed = 7;
+    for (std::uint8_t &byte : noise.rgba)
+        byte = static_cast<std::uint8_t>((seed = seed * 1664525u + 1013904223u) >> 24);
+    const std::string root = scratch() + "/telegram/PS5/PPSA01234";
+    std::system(("mkdir -p '" + root + "'").c_str());
+    const std::string path = root + "/20261009_183501_00000001.jpg";
+    const std::string jpeg = encode_jpeg(noise, 100);
+    CHECK(jpeg.size() > (10u << 20));
+    CHECK(write_text_file_atomic(path, jpeg));
+    const MediaItem shot = sample_item(path, jpeg.size());
+
+    MediaItem photo;
+    CHECK(make_photo_copy(shot, scratch() + "/telegram/copy.jpg", &photo));
+    CHECK(photo.size <= (10u << 20));
+    CHECK_EQ(photo.file, "20261009_183501_00000001.jpg");
+    Picture back;
+    std::string bytes;
+    CHECK(read_text_file(photo.path, &bytes, 64u << 20));
+    CHECK(decode_picture_bytes(bytes, 9999, 9999, &back));
+    CHECK_EQ(back.width, 2560);
+    CHECK_EQ(back.height, 1600);
+
+    // Sent: the photo copy, then the original as a file, captioned "Full size".
+    const Config config = ready_config();
+    FakeServer server;
+    const UploadOutcome outcome = upload_capture_with(
+        config, *config.find("telegram"), shot, "Astro", nullptr, fake_transport, &server, false);
+    CHECK(outcome.ok);
+    CHECK_EQ(server.urls.size(), 2u);
+    CHECK_EQ(server.captions.size(), 2u);
+    if (server.urls.size() == 2 && server.captions.size() == 2)
+    {
+        CHECK(server.urls[0].find("/sendPhoto") != std::string::npos);
+        CHECK(server.captions[0].find("Screenshot from Astro") != std::string::npos);
+        CHECK(server.urls[1].find("/sendDocument") != std::string::npos);
+        CHECK(server.captions[1] == "Full size \xC2\xB7 20261009_183501_00000001.jpg");
+    }
+
+    // In a Send all: one photo album of three (two of them copies), then the
+    // two originals as files: one message each here, as together they pass 50 MB.
+    const std::string second = root + "/20261009_183502_00000002.jpg";
+    const std::string small = root + "/20261009_183503_00000003.jpg";
+    CHECK(write_text_file_atomic(second, jpeg));
+    CHECK(write_text_file_atomic(small, encode_jpeg(back, 80)));
+    server = FakeServer{};
+    std::vector<MediaItem> batch = {shot, sample_item(second, jpeg.size()), sample_item(small, 0)};
+    batch[2].size = file_size_of(small);
+    const UploadOutcome album =
+        upload_album_with(config, *config.find("telegram"), batch, {"Astro"}, nullptr,
+                          fake_transport, &server, false);
+    CHECK(album.ok);
+    CHECK_EQ(server.urls.size(), 3u);
+    if (server.urls.size() == 3)
+    {
+        CHECK(server.urls[0].find("/sendMediaGroup") != std::string::npos);
+        CHECK(server.urls[1].find("/sendDocument") != std::string::npos);
+        CHECK(server.urls[2].find("/sendDocument") != std::string::npos);
+    }
 }
 
 TEST(big_files_go_through_the_fallback)
@@ -510,6 +867,29 @@ TEST(big_files_go_through_the_fallback)
     }
 }
 
+TEST(big_files_can_go_to_a_drive)
+{
+    // Discord's fallback is a folder: the clip is copied there, and the post
+    // says where instead of carrying a link.
+    Config config = ready_config();
+    const std::string root = scratch() + "/fallback";
+    std::system(("mkdir -p '" + root + "/video/PS5/PPSA01234' '" + root + "/drive'").c_str());
+    const std::string file = root + "/video/PS5/PPSA01234/20261009_183600_00000002.webm";
+    write_file(file, std::string(4000, 'v'));
+    MediaItem clip = sample_item(file, 30ull << 20); // too big for Discord, as far as it knows
+    Destination &usb = *config.find("usb");
+    usb.enabled = true;
+    usb.path = root + "/drive";
+    config.find("discord")->fallback = "usb";
+    FakeServer server;
+    const UploadOutcome outcome = upload_capture_with(
+        config, *config.find("discord"), clip, "Astro", nullptr, fake_transport, &server, false);
+    CHECK(outcome.ok);
+    CHECK(file_exists(root + "/drive/PShare/Astro/20261009_183600_00000002.webm"));
+    CHECK_EQ(server.urls.size(), 1u); // only Discord, with the note
+    CHECK(outcome.link.find("saved to USB drive") != std::string::npos);
+}
+
 TEST(retries_transient_failures)
 {
     Config config = ready_config();
@@ -527,6 +907,183 @@ TEST(retries_transient_failures)
                                                      nullptr, fake_transport, &server, false);
     CHECK(!failed.ok);
     CHECK_EQ(failed.attempts, 3);
+}
+
+struct FakeDrive
+{
+    std::vector<HttpRequest> requests;
+    std::uint64_t size = 0;
+    bool expired = false;
+};
+
+HttpResult fake_drive(const HttpRequest &request, UploadProgress *, void *user)
+{
+    FakeDrive *drive = static_cast<FakeDrive *>(user);
+    drive->requests.push_back(request);
+    HttpResult result;
+    result.transport_ok = true;
+    result.status = 200;
+    if (request.url.find("login.microsoftonline.com") != std::string::npos)
+    {
+        if (drive->expired)
+        {
+            result.status = 400;
+            result.body =
+                R"({"error":"invalid_grant","error_description":"AADSTS70000.\r\nTrace"})";
+        }
+        else
+        {
+            result.body = R"({"token_type":"Bearer","access_token":"at","refresh_token":"r2"})";
+        }
+    }
+    else if (request.url.find("createUploadSession") != std::string::npos)
+    {
+        result.body = R"({"uploadUrl":"https://up.example/s1"})";
+    }
+    else if (request.method == "PUT" && request.raw_offset + request.raw_length < drive->size)
+    {
+        result.status = 202;
+        result.body = R"({"nextExpectedRanges":["0-"]})";
+    }
+    else if (request.url.find("/createLink") != std::string::npos)
+    {
+        result.status = 201;
+        result.body = R"({"id":"perm","link":{"type":"view","webUrl":"https://1drv.ms/v/share"}})";
+    }
+    else if (request.url.find("discord.com") != std::string::npos)
+    {
+        result.body = R"({"attachments":[]})";
+    }
+    else
+    {
+        // Graph can name who made it, and its id, before the item's own id.
+        result.status = 201;
+        result.body = R"({"createdBy":{"user":{"id":"someone"}},"id":"ITEM!1","name":"x.webm",)"
+                      R"("webUrl":"https://onedrive.live.com/x"})";
+    }
+    return result;
+}
+
+bool has_header(const HttpRequest &request, const std::string &header)
+{
+    return std::find(request.headers.begin(), request.headers.end(), header) !=
+           request.headers.end();
+}
+
+TEST(onedrive_signs_in_and_sends_slices)
+{
+    Config config = ready_config();
+    Destination &drive = *config.find("onedrive");
+    CHECK(!drive.configured());
+    CHECK_EQ(drive.path, "PShare");
+    drive.client_id = "app-1";
+    drive.token = "r1";
+    CHECK(drive.configured());
+    const std::string token_file = scratch() + "/onedrive-onedrive.token";
+    const std::uint64_t slice = 10ull << 20;
+    const MediaItem clip = sample_item("/v/PS5/PPSA01234/20261009_183501_00000002.webm", slice + 5);
+    FakeDrive server;
+    server.size = clip.size;
+    UploadProgress progress;
+    UploadOutcome outcome = send_to_onedrive(config, drive, clip, "Astro: Bot?", &progress,
+                                             fake_drive, &server, false, token_file);
+    CHECK(outcome.ok);
+    CHECK_EQ(outcome.link, "https://onedrive.live.com/x");
+    CHECK_EQ(progress.sent.load(), clip.size);
+    CHECK_EQ(server.requests.size(), 4u);
+    if (server.requests.size() == 4)
+    {
+        CHECK(server.requests[0].text.find("client_id=app-1") != std::string::npos);
+        CHECK(server.requests[0].text.find("refresh_token=r1&") != std::string::npos);
+        CHECK_EQ(server.requests[1].url, "https://graph.microsoft.com/v1.0/me/drive/root:/PShare/"
+                                         "Astro_%20Bot_/20261009_183501_00000002.webm"
+                                         ":/createUploadSession");
+        CHECK(has_header(server.requests[1], "Authorization: Bearer at"));
+        const HttpRequest &first = server.requests[2];
+        const HttpRequest &last = server.requests[3];
+        CHECK_EQ(first.method, "PUT");
+        CHECK_EQ(first.url, "https://up.example/s1");
+        CHECK(has_header(first, "Content-Range: bytes 0-10485759/10485765"));
+        CHECK_EQ(first.raw_length, slice);
+        CHECK(has_header(last, "Content-Range: bytes 10485760-10485764/10485765"));
+        CHECK_EQ(last.raw_offset, slice);
+        CHECK_EQ(last.raw_length, 5u);
+        // The upload session URL is already authorized; the token stays with Graph.
+        CHECK(!has_header(last, "Authorization: Bearer at"));
+    }
+    std::string saved;
+    CHECK(read_text_file(token_file, &saved));
+    CHECK_EQ(saved, "r1\nr2\n");
+
+    // The renewed token is used next, until a new one is typed in.
+    server = FakeDrive{};
+    server.size = clip.size;
+    outcome = send_to_onedrive(config, drive, clip, "Astro", nullptr, fake_drive, &server, false,
+                               token_file);
+    CHECK(outcome.ok);
+    CHECK(!server.requests.empty() &&
+          server.requests[0].text.find("refresh_token=r2&") != std::string::npos);
+    drive.token = "r9";
+    server.requests.clear();
+    send_to_onedrive(config, drive, clip, "Astro", nullptr, fake_drive, &server, false, token_file);
+    CHECK(!server.requests.empty() &&
+          server.requests[0].text.find("refresh_token=r9&") != std::string::npos);
+
+    server = FakeDrive{};
+    server.expired = true;
+    outcome = send_to_onedrive(config, drive, clip, "Astro", nullptr, fake_drive, &server, false,
+                               token_file);
+    CHECK(!outcome.ok);
+    CHECK(outcome.error.find("expired") != std::string::npos);
+    CHECK_EQ(server.requests.size(), 1u);
+
+    HttpRequest request;
+    std::string error;
+    CHECK(!plan_request(drive, clip, caption_info(clip, "Astro"), {}, &request, &error));
+
+    // A clip too big for Discord goes to OneDrive, and Discord gets a link anyone can open.
+    drive.token = "r1";
+    config.find("discord")->fallback = "onedrive";
+    const MediaItem big = sample_item(clip.path, 30ull << 20);
+    server = FakeDrive{};
+    server.size = big.size;
+    outcome = upload_capture_with(config, *config.find("discord"), big, "Astro", nullptr,
+                                  fake_drive, &server, false);
+    CHECK(outcome.ok);
+    CHECK_EQ(outcome.link, "https://1drv.ms/v/share");
+    bool linked = false;
+    for (const HttpRequest &each : server.requests)
+    {
+        if (each.url.find("/items/ITEM%211/createLink") != std::string::npos)
+            linked = true;
+        if (each.url.find("discord.com") != std::string::npos)
+            CHECK(part(each, "payload_json")->value.find("https://1drv.ms/v/share") !=
+                  std::string::npos);
+    }
+    CHECK(linked);
+    std::string top;
+    CHECK(json_top_string(R"({"a":{"id":"inner"},"id":"outer"})", "id", &top) && top == "outer");
+    CHECK(!json_top_string(R"({"a":{"id":"inner"}})", "id", &top));
+
+    IniDocument document;
+    document.parse(default_config_text());
+    store_config(config, &document);
+    IniDocument again;
+    again.parse(document.write());
+    Config back;
+    load_config(again, &back, nullptr);
+    CHECK_EQ(back.find("onedrive")->client_id, "app-1");
+    CHECK_EQ(back.find("onedrive")->token, "r1");
+    CHECK_EQ(back.find("onedrive")->path, "PShare");
+    CHECK_EQ(back.find("usb")->path, "usb");
+
+    std::vector<std::string> errors;
+    CHECK_EQ(apply_setup_form({{"d.onedrive.client_id", " app-2 "}}, &back, &errors), 1);
+    CHECK_EQ(back.find("onedrive")->client_id, "app-2");
+    CHECK(setup_page(back, "", false).find("name=\"d.onedrive.client_id\"") != std::string::npos);
+    Paths paths;
+    paths.data_root = "/x";
+    CHECK_EQ(paths.onedrive_token("onedrive"), "/x/onedrive-onedrive.token");
 }
 
 // ---- history -------------------------------------------------------------------
@@ -576,6 +1133,30 @@ TEST(setup_requests_and_forms)
     CHECK_EQ(html_escape("<a href=\"x\">"), "&lt;a href=&quot;x&quot;&gt;");
 }
 
+TEST(size_limits_stay_within_the_service)
+{
+    Config config = ready_config();
+    Destination &discord = *config.find("discord");
+    CHECK_EQ(discord.service_ceiling_mb(), 100);
+    discord.max_mb = 0;
+    CHECK_EQ(discord.size_limit(), 20ull << 20);
+    CHECK(discord.has_size_limit());
+    CHECK(config.find("uguu")->has_size_limit());
+    CHECK(!config.find("usb")->has_size_limit());
+    CHECK(!config.find("onedrive")->has_size_limit());
+    CHECK_EQ(config.find("x0")->max_mb, 1024);
+    std::vector<std::string> errors;
+    CHECK_EQ(apply_setup_form({{"d.discord.max_mb", "150"}, {"d.catbox.max_mb", "100"}}, &config,
+                              &errors),
+             1);
+    CHECK_EQ(errors.size(), 1u);
+    CHECK_EQ(discord.max_mb, 0);
+    CHECK_EQ(config.find("catbox")->max_mb, 100);
+    const std::string page = setup_page(config, "", false);
+    CHECK(page.find("name=\"d.catbox.max_mb\"") != std::string::npos);
+    CHECK(page.find("name=\"d.usb.max_mb\"") == std::string::npos);
+}
+
 TEST(setup_form_changes_the_config)
 {
     Config config = ready_config();
@@ -607,6 +1188,8 @@ TEST(setup_form_changes_the_config)
     CHECK_EQ(errors.size(), 3u);
     const std::string page = setup_page(config, "Saved", false);
     CHECK(page.find("name=\"d.discord.url\"") != std::string::npos);
+    // Destinations fold up under their names; their fields are still in the form.
+    CHECK(page.find("<details class=\"card\"><summary><h2>Discord") != std::string::npos);
     // Saved secrets never go back to the browser; an empty field keeps them.
     CHECK(page.find("webhooks/2/x") == std::string::npos);
     CHECK(page.find("123:abc") == std::string::npos);
@@ -615,6 +1198,32 @@ TEST(setup_form_changes_the_config)
     CHECK_EQ(config.find("discord")->url, "https://discord.com/api/webhooks/2/x");
     CHECK_EQ(config.find("telegram")->token, "123:abc");
     CHECK_EQ(config.find("custom")->headers.size(), 2u);
+}
+
+TEST(gallery_selects_sends_and_deletes)
+{
+    GalleryItem shot;
+    shot.path = "/user/av_contents/photo/PS5/PPSA01234/20261009_183501_00000001.jpg";
+    shot.game = "Astro";
+    GalleryItem clip = shot;
+    clip.path = "/user/av_contents/video/PS5/PPSA01234/20261009_183600_00000002.webm";
+    clip.video = true;
+    GalleryFilter filter;
+    filter.game = "PPSA01234";
+    filter.total = 120;
+    filter.destinations = {{"telegram", "Telegram"}};
+    const std::string page = gallery_page({shot, clip}, 1, 3, "Sending 2 captures", filter);
+    CHECK(page.find("<form method=\"post\" action=\"/act\"") != std::string::npos);
+    CHECK(page.find("name=\"s.0\" value=\"" + shot.path + "\"") != std::string::npos);
+    CHECK(page.find("name=\"s.1\" value=\"" + clip.path + "\"") != std::string::npos);
+    CHECK(page.find("value=\"send-all\">Send all 120</button>") != std::string::npos);
+    CHECK(page.find("<option value=\"telegram\">Telegram</option>") != std::string::npos);
+    CHECK(page.find("name=\"page\" value=\"1\"") != std::string::npos);
+    CHECK(page.find("name=\"game\" value=\"PPSA01234\"") != std::string::npos);
+    CHECK(page.find("value=\"delete\"") != std::string::npos);
+    CHECK(page.find("Sending 2 captures") != std::string::npos);
+    // Nothing to tick, nothing to send.
+    CHECK(gallery_page({}, 0, 1, {}, {}).find("send-all") == std::string::npos);
 }
 
 TEST(daemon_status_round_trip)
@@ -643,6 +1252,8 @@ TEST(daemon_status_round_trip)
     CHECK_EQ(again.ip, "192.168.1.5");
     CHECK_EQ(again.sent, 10u);
     CHECK_EQ(again.total, 20u);
+    status.delete_ask = 4;
+    CHECK_EQ(DaemonStatus::parse(status.serialize()).delete_ask, 4);
 }
 
 // ---- sending without the internet ---------------------------------------------
@@ -691,6 +1302,29 @@ TEST(folder_copies)
     outcome = copy_to_folder(usb, paths, item, "Astro", &progress);
     CHECK(!outcome.ok);
     CHECK_EQ(safe_name(".."), "Captures");
+}
+
+TEST(pending_deletes_are_finished_by_the_app)
+{
+    const std::string root = scratch() + "/pending";
+    std::system(("mkdir -p '" + root + "/photo/PPSA01234/a' '" + root + "/video'").c_str());
+    Paths paths;
+    paths.data_root = root;
+    paths.photo_root = root + "/photo";
+    paths.video_root = root + "/video";
+    const std::string shot = root + "/photo/PPSA01234/a/20261009_183501_00000001.jpg";
+    write_file(shot, "x");
+    write_file(root + "/photo/PPSA01234/a/20261009_183501_00000001.dat", "d");
+    CHECK(add_pending_delete(paths, shot));
+    CHECK(add_pending_delete(paths, root + "/photo/PPSA01234/a/gone.jpg")); // already gone
+    CHECK(add_pending_delete(paths, "/etc/passwd"));                        // not a capture
+    CHECK_EQ(delete_pending_captures(paths), 2);
+    CHECK(!file_exists(shot));
+    CHECK(!file_exists(root + "/photo/PPSA01234/a"));
+    // Nothing is left to retry: what went is done, and /etc/passwd is not a capture.
+    CHECK(file_exists("/etc/passwd"));
+    CHECK(!file_exists(paths.pending_deletes()));
+    CHECK_EQ(delete_pending_captures(paths), 0);
 }
 
 TEST(also_send_round_trip)
@@ -747,21 +1381,21 @@ TEST(ranges)
 
 TEST(thumbnails_shrink_and_encode)
 {
-    app::Picture big;
+    Picture big;
     big.width = 400;
     big.height = 200;
     big.rgba.assign(static_cast<std::size_t>(400 * 200 * 4), 200);
-    const app::Picture small = app::shrink(big, 100, 100);
+    const Picture small = shrink(big, 100, 100);
     CHECK_EQ(small.width, 100);
     CHECK_EQ(small.height, 50);
     CHECK_EQ(small.rgba[0], 200);
-    const std::string jpeg = app::encode_jpeg(small, 80);
+    const std::string jpeg = encode_jpeg(small, 80);
     CHECK(jpeg.size() > 100 && static_cast<unsigned char>(jpeg[0]) == 0xff);
-    app::Picture decoded;
-    CHECK(app::decode_picture_bytes(jpeg, 50, 50, &decoded));
+    Picture decoded;
+    CHECK(decode_picture_bytes(jpeg, 50, 50, &decoded));
     CHECK_EQ(decoded.width, 50);
     CHECK_EQ(decoded.height, 25);
-    CHECK(!app::decode_picture_bytes("not a picture", 50, 50, &decoded));
+    CHECK(!decode_picture_bytes("not a picture", 50, 50, &decoded));
 }
 
 } // namespace

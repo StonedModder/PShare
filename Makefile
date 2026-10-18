@@ -25,7 +25,11 @@ OPENGL_SDK := .deps/ps5-opengl/current
 DAEMON_ELF := build/daemon/pshared.elf
 override APP_DEFINITIONS := $(strip GL_GLEXT_PROTOTYPES=1 PSHARE_CONSOLE=1 PSHARE_HAVE_SMB2=1 \
 	$(APP_DEFINITIONS))
-override APP_INCLUDE_PATHS := $(strip src src/net $(OPENGL_SDK)/include $(APP_INCLUDE_PATHS))
+# jxrlib (JPEG XR, the PS5's HDR screenshots) is built through src/third_party/jxrlib.
+JXRLIB_INCLUDE_PATHS := third_party/jxrlib third_party/jxrlib/common/include \
+	third_party/jxrlib/image/sys third_party/jxrlib/jxrgluelib
+override APP_INCLUDE_PATHS := $(strip src src/net $(OPENGL_SDK)/include $(JXRLIB_INCLUDE_PATHS) \
+	$(APP_INCLUDE_PATHS))
 override APP_STATIC_ARCHIVES := $(strip .deps/ps5-opengl/libps5opengl-group.a $(APP_STATIC_ARCHIVES))
 override APP_IMPORT_STUBS := $(strip $(OPENGL_SDK)/lib/libSceAgc.so \
 	$(OPENGL_SDK)/lib/libSceAgcDriver.so $(APP_IMPORT_STUBS))

@@ -10,6 +10,13 @@
 
 namespace pshare
 {
+namespace
+{
+// A capture that turns up after the first look is new unless its file is
+// dated well before watching began: some carry a time hours off the
+// console's clock (local time written as UTC), so a day of slack.
+constexpr std::int64_t kClockSlack = 24 * 3600;
+} // namespace
 
 void Watcher::configure(const Config &config)
 {
@@ -68,6 +75,7 @@ void Watcher::load(std::int64_t now)
     if (read_text_file(paths_.daemon_seen(), &text, 64u << 20))
     {
         parse(text, now);
+        baselined_ = true; // the list is the back catalogue already
         return;
     }
     reset(now);
@@ -89,6 +97,7 @@ void Watcher::reset(std::int64_t now)
     seen_.clear();
     pending_.clear();
     since_ = now;
+    baselined_ = false;
     dirty_ = true;
 }
 
@@ -105,7 +114,11 @@ std::vector<MediaItem> Watcher::poll(std::int64_t now)
     if (!options_.screenshots && !options_.videos)
         return ready;
     ScanResult scan = scan_media(paths_, options_);
-    last_errno_ = (scan.photo_root || scan.video_root) ? 0 : scan.open_errno;
+    const bool looked = scan.photo_root || scan.video_root;
+    last_errno_ = looked ? 0 : scan.open_errno;
+    problems_.unreadable = scan.unreadable;
+    problems_.unreadable_path = scan.unreadable_path;
+    problems_.unreadable_errno = scan.unreadable_errno;
 
     std::set<std::string> present;
     for (MediaItem &item : scan.items)
@@ -113,8 +126,8 @@ std::vector<MediaItem> Watcher::poll(std::int64_t now)
         present.insert(item.path);
         if (seen_.count(item.path) != 0)
             continue;
-        // The back catalogue: there before watching began.
-        if (!upload_existing_ && item.mtime < since_)
+        // The back catalogue: there at the first look, or dated well before it.
+        if (!upload_existing_ && ((!baselined_ && looked) || item.mtime < since_ - kClockSlack))
         {
             seen_.insert(item.path);
             dirty_ = true;
@@ -145,6 +158,8 @@ std::vector<MediaItem> Watcher::poll(std::int64_t now)
             ready.push_back(std::move(item));
         }
     }
+    if (looked)
+        baselined_ = true;
     // Deleted before it settled (or before it was sent): drop it.
     for (auto it = pending_.begin(); it != pending_.end();)
     {

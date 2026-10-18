@@ -132,12 +132,13 @@ No proprietary runtime module, encryption key, or game file is included.
 | [blackbearreloaded/ps5-homebrew-ui](https://github.com/blackbearreloaded/ps5-homebrew-ui) | The OpenGL UI kit in `src/ui`, `src/gfx`, `src/core`, `src/audio`, `src/platform`, its fonts and sound effects | GPL-3.0-or-later (fonts: see their licence files) |
 | [blackbearreloaded/ps5-native-app-boilerplate](https://github.com/blackbearreloaded/ps5-native-app-boilerplate) | Build pipeline, runtime shim, Lapy client, `console_curl` | GPL-3.0-or-later |
 | [StonedModder/Porkfolio](https://github.com/StonedModder/Porkfolio) | Where the PS5 keeps captures (documentation only) | see upstream |
-| [nothings/stb](https://github.com/nothings/stb) | `stb_image`, `stb_image_write` (thumbnails) | MIT / public domain |
+| [nothings/stb](https://github.com/nothings/stb) | `stb_image`, `stb_image_write` (thumbnails; Telegram-sized photo copies of big screenshots, in the app and pshared) | MIT / public domain |
+| [jxrlib](https://github.com/4creators/jxrlib) (Microsoft, commit f752187) | JPEG XR decoding: the PS5's HDR screenshots, tone-mapped to SDR for thumbnails, the browser and photo copies (app, pshared and tests). Unchanged in `third_party/jxrlib`, built through `src/third_party/jxrlib` | BSD 2-Clause |
 | [nayuki/QR-Code-generator](https://github.com/nayuki/QR-Code-generator) | `qrcodegen` (links and the phone page as QR codes) | MIT |
 | libcurl, OpenSSL, zlib, zstd, libpsl via [PacBrew](https://github.com/ps5-payload-dev/pacbrew-repo) | HTTPS uploads in the app and in pshared | curl, Apache-2.0, zlib, BSD, MIT |
 | [FFmpeg](https://ffmpeg.org/) 7.0 (libavformat, libavcodec, libswscale, libswresample, libavutil) via PacBrew, built `--enable-gpl --enable-libx264` with bzip2, xz, libiconv | Clip playback and clip thumbnails in the app | GPL-2.0-or-later as built (x264), linked into a GPL-3.0-or-later app |
 | [ZiZc3/VLC](https://github.com/ZiZc3/VLC) (VLC for PS5) | The PS5-recording Opus header workaround (reimplemented in `src/app/video.cpp` after its FFmpeg patch) and the clip player's button layout; no code copied verbatim | GPL-3.0 |
-| [libsmb2](https://github.com/sahlberg/libsmb2) 6.1 via PacBrew | Copies to a PC share (app and pshared) | LGPL-2.1-or-later |
+| [libsmb2](https://github.com/sahlberg/libsmb2) 6.1 via PacBrew | Copies to a PC or Mac share (app and pshared) | LGPL-2.1-or-later |
 | [blackbearreloaded/ProsperoStore](https://github.com/blackbearreloaded/ProsperoStore) | The Lapy client (`src/elevation`) and helper build script, taken from it | GPL-3.0-or-later |
 
 The icon, backgrounds, splash and in-app art are drawn by `tools/make-art.py`

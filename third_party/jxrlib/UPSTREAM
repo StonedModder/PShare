@@ -1,0 +1,6 @@
+jxrlib (JPEG XR reference codec), Microsoft Corp., BSD 2-Clause (see LICENSE).
+https://github.com/4creators/jxrlib  commit f7521879862b9085318e814c6157490dd9dbbdb4
+sha256 of that commit's tarball (codeload.github.com/4creators/jxrlib/tar.gz/<commit>): 8ab20a21f6c3f8cfdedd2511b03a2009e52cce7fa6550202c355063d0d83213e
+Copied: common/include, image/{sys,decode,encode,x86}, jxrgluelib (.c and .h only), LICENSE,
+README.md. Unchanged, except that git stores .c/.h with LF line endings (.gitattributes).
+Built through src/third_party/jxrlib/ (one wrapper per file, jxr_port.h); see there.

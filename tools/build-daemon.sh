@@ -38,7 +38,8 @@ flags=(-std=c++20 -O2 -g0 -Wall -Wextra -Werror -Wno-unused-command-line-argumen
 
 # Which build this is: the app compares it with the running pshared and
 # replaces an older one (daemon/main.cpp, PSHARE_BUILD).
-build_id=b$(cat "${sources[@]}" $(find "$root/src/pshare/core" -name '*.hpp' | sort) |
+build_id=b$(cat "${sources[@]}" $(find "$root/src/pshare/core" -name '*.hpp' | sort) \
+    $(find "$root/src/third_party/jxrlib" -type f | sort) |
     sha256sum | cut -c1-12)
 main_object="$build/obj/daemon_main.cpp.o"
 if [[ ! -f $build/build-id || $(<"$build/build-id") != "$build_id" ]]; then
@@ -63,6 +64,23 @@ for source in "${sources[@]}"; do
             wait "${pids[0]}"
             pids=("${pids[@]:1}")
         fi
+    fi
+done
+# stb_image and jxrlib (core/picture.cpp) are vendored C; built as published, without warnings.
+c_sources=("$root/src/third_party/stb_image/stb_image.c"
+    "$root/src/third_party/stb_image/stb_image_write.c")
+while IFS= read -r -d '' source; do
+    c_sources+=("$source")
+done < <(find "$root/src/third_party/jxrlib" -name '*.c' -print0 | sort -z)
+for source in "${c_sources[@]}"; do
+    relative=${source#"$root/"}
+    object="$build/obj/${relative//\//_}.o"
+    objects+=("$object")
+    if [[ ! -f $object || $source -nt $object ]]; then
+        "$sdk/bin/prospero-clang" -std=c11 -O2 -g0 -w -I"$root/src" -I"$root/third_party/jxrlib" \
+            -I"$root/third_party/jxrlib/common/include" -I"$root/third_party/jxrlib/image/sys" \
+            -I"$root/third_party/jxrlib/jxrgluelib" -c "$source" -o "$object" &
+        pids+=($!)
     fi
 done
 for pid in "${pids[@]}"; do wait "$pid"; done
