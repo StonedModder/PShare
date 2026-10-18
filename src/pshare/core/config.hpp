@@ -50,6 +50,17 @@ struct Paths
     {
         return data_root + "/thumbs";
     }
+    // Captures sent with "delete once sent" that pshared could not delete; the
+    // app, which can, finishes them (media.hpp, delete_pending_captures).
+    std::string pending_deletes() const
+    {
+        return data_root + "/delete-after-send.txt";
+    }
+    // The newest OneDrive refresh token for a destination (upload_onedrive.cpp).
+    std::string onedrive_token(const std::string &id) const
+    {
+        return data_root + "/onedrive-" + id + ".token";
+    }
 };
 
 constexpr int kControlPort = 9077; // pshared listens on 127.0.0.1 only
@@ -63,9 +74,10 @@ enum class DestinationType : std::uint8_t
     telegram,
     catbox,
     litterbox,
-    http,   // any multipart/form-data endpoint
-    folder, // a copy on a drive: a USB stick or the extended storage
-    smb,    // a copy in a shared folder on a PC (Windows share, Samba)
+    http,     // any multipart/form-data endpoint
+    folder,   // a copy on a drive: a USB stick or the extended storage
+    smb,      // a copy in a shared folder on a PC or Mac (Windows share, macOS, Samba)
+    onedrive, // a folder in OneDrive, through Microsoft Graph
     count,
 };
 
@@ -79,8 +91,9 @@ struct Destination
     DestinationType type = DestinationType::discord;
     std::string name;                   // shown in the app; the id when empty
     std::string url;                    // webhook, server, endpoint, or smb://host/share/folder
-    std::string path = "usb";           // folder: "usb" (the first drive found) or an absolute path
-    std::string token;                  // telegram bot token, catbox userhash, smb password
+    std::string path = "usb";           // folder: "usb" or an absolute path; onedrive: its folder
+    std::string token;                  // bot token, catbox userhash, smb password, refresh token
+    std::string client_id;              // onedrive: the app registration's client ID
     std::string chat_id;                // telegram
     std::string username;               // discord: the poster's name; smb: the account
     std::string message;                // caption template, see expand_caption()
@@ -96,10 +109,18 @@ struct Destination
     {
         return name.empty() ? id : name;
     }
-    // The service's own ceiling in bytes, or max_mb when set.
+    // The service's own limit in bytes, or max_mb when set.
     std::uint64_t size_limit() const;
+    // The most the service can take in MB whatever the setting (Discord: a
+    // server at boost level 3), 0 when it states none. max_mb stays at or below it.
+    int service_ceiling_mb() const;
     // True when the fields the type needs are filled in.
     bool configured() const;
+    // Takes a size limit, with a fallback host for bigger files: the HTTP services.
+    bool has_size_limit() const
+    {
+        return !local() && type != DestinationType::onedrive;
+    }
     // Copies to a drive or a share instead of going over HTTP.
     bool local() const
     {

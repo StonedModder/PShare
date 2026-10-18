@@ -108,14 +108,28 @@ Log g_log;
 
 // ---- shared state ----------------------------------------------------------
 
-// QUEUE [<destination>\t]<path>: the app hands an upload over, so it goes on
-// after the app closes. An empty destination is the configured one. Each gets
-// a number the app asks RESULT about.
+// QUEUE [<destination>\t]<path>[\t<flags>]: the app hands an upload over, so
+// it goes on after the app closes. An empty destination is the configured one.
+// Each gets a number the app asks RESULT about. Flags, comma separated:
+//   delete  delete the capture from the console once it is sent;
+//   batch   one of many ("Send all"): no notification each, one at the end.
 struct ManualJob
 {
     int id = 0;
     std::string destination;
     std::string path;
+    bool delete_after = false;
+    bool batch = false;
+};
+
+// What the batch jobs sent since the queue was last empty did, for the one
+// notification at its end.
+struct BatchTally
+{
+    int sent = 0;
+    int failed = 0;
+    int deleted = 0;
+    int waiting = 0; // sent, and left for the app to delete
 };
 
 struct Shared
@@ -123,8 +137,11 @@ struct Shared
     std::mutex mutex;
     DaemonStatus status;
     std::deque<ManualJob> manual;
+    std::chrono::steady_clock::time_point last_queued; // the newest QUEUE
+    BatchTally batch;
     int next_job = 1;
     int current_job = 0;
+    std::vector<int> sending; // every job going now: one, or the jobs of an album
     // RESULT answers: "ok <destination>\t<link>" or "failed <destination>\t<error>",
     // the newest 64.
     std::map<int, std::string> results;
@@ -209,7 +226,8 @@ bool web_open_locked()
     return g_shared.setup_until > now || g_shared.app_seen > now - 15;
 }
 
-int queue_manual(const std::string &destination, const std::string &path, std::string *error)
+int queue_manual(const std::string &destination, const std::string &path, std::string *error,
+                 std::string_view flags = {})
 {
     MediaItem item;
     if (path.empty() || !describe_media(path, &item))
@@ -217,7 +235,7 @@ int queue_manual(const std::string &destination, const std::string &path, std::s
         *error = "not a capture";
         return 0;
     }
-    if (g_shared.manual.size() >= 500)
+    if (g_shared.manual.size() >= 5000)
     {
         *error = "queue full";
         return 0;
@@ -234,7 +252,13 @@ int queue_manual(const std::string &destination, const std::string &path, std::s
     job.id = g_shared.next_job++;
     job.destination = destination;
     job.path = path;
+    for (const std::string &flag : split(flags, ','))
+    {
+        job.delete_after = job.delete_after || iequals(trim(flag), "delete");
+        job.batch = job.batch || iequals(trim(flag), "batch");
+    }
     g_shared.manual.push_back(std::move(job));
+    g_shared.last_queued = std::chrono::steady_clock::now();
     g_shared.rescan = true;
     return g_shared.next_job - 1;
 }
@@ -246,7 +270,8 @@ std::string job_result_locked(int id)
     const auto found = g_shared.results.find(id);
     if (found != g_shared.results.end())
         return found->second;
-    if (id == g_shared.current_job && id != 0)
+    if (id != 0 &&
+        std::find(g_shared.sending.begin(), g_shared.sending.end(), id) != g_shared.sending.end())
         return "pending";
     for (const ManualJob &job : g_shared.manual)
         if (job.id == id)
@@ -307,20 +332,30 @@ std::string handle_command(std::string_view line)
     {
         // What the app handed over and has not gone yet is dropped too.
         for (const ManualJob &job : g_shared.manual)
+        {
             g_shared.results[job.id] = "failed " + job.destination + "\tCancelled";
+            if (job.batch)
+                ++g_shared.batch.failed;
+        }
         g_shared.manual.clear();
+        while (g_shared.results.size() > 64)
+            g_shared.results.erase(g_shared.results.begin());
         g_progress.cancel = true;
         return "ok\n";
     }
     if (verb == "QUEUE")
     {
-        const std::size_t tab = argument.find('\t');
+        // <path>, <destination>\t<path> or <destination>\t<path>\t<flags>. Split
+        // before trimming: an empty destination leaves the line starting with a tab.
+        const std::vector<std::string> fields =
+            split(space == std::string::npos ? std::string_view()
+                                             : std::string_view(text).substr(space + 1),
+                  '\t');
         const std::string destination =
-            tab == std::string::npos ? std::string() : std::string(trim(argument.substr(0, tab)));
-        const std::string path =
-            tab == std::string::npos ? argument : std::string(trim(argument.substr(tab + 1)));
+            fields.size() >= 2 ? std::string(trim(fields[0])) : std::string();
+        const std::string path = std::string(trim(fields.size() >= 2 ? fields[1] : argument));
         std::string error;
-        const int id = queue_manual(destination, path, &error);
+        const int id = queue_manual(destination, path, &error, fields.size() >= 3 ? fields[2] : "");
         if (id == 0)
             return "error " + error + "\n";
         return "ok " + std::to_string(id) + "\n";
@@ -989,7 +1024,7 @@ bool fetch_through_app(const Paths &paths, const MediaItem &item, std::string *c
 // Returns the id it went to, empty when nothing was sent.
 std::string send_one(const Paths &paths, const Config &config, TitleNames *names, History *history,
                      const MediaItem &item, bool automatic, const std::string &forced = {},
-                     UploadOutcome *result = nullptr)
+                     UploadOutcome *result = nullptr, bool quiet = false)
 {
     const Destination *destination =
         forced.empty() ? config.destination_for(item.title_id) : config.find(forced);
@@ -1062,7 +1097,7 @@ std::string send_one(const Paths &paths, const Config &config, TitleNames *names
         g_log.write("sent %s -> %s", item.file.c_str(), outcome.link.c_str());
     else
         g_log.write("failed %s: %s", item.file.c_str(), outcome.error.c_str());
-    if (config.notify)
+    if (config.notify && !quiet)
     {
         if (outcome.ok)
             notify(std::string("PShare: ") + item.kind_label() +
@@ -1072,6 +1107,59 @@ std::string send_one(const Paths &paths, const Config &config, TitleNames *names
     }
     (void)paths;
     return outcome.ok ? outcome.destination : std::string();
+}
+
+// Where a job the app handed over goes: the destination it names, or the one
+// the config picks for the capture's game.
+const Destination *job_destination(const Config &config, const ManualJob &job,
+                                   const MediaItem &item)
+{
+    return job.destination.empty() ? config.destination_for(item.title_id)
+                                   : config.find(job.destination);
+}
+
+// Sends screenshots of a Send all as one Telegram album (upload_album) and
+// writes what send_one writes for each: history, counters, log.
+UploadOutcome send_album(const Config &config, TitleNames *names, History *history,
+                         const Destination &destination, const std::vector<MediaItem> &items)
+{
+    std::vector<std::string> games;
+    for (const MediaItem &item : items)
+        games.push_back(names->display(item.title_id));
+    set_state("uploading");
+    {
+        std::lock_guard<std::mutex> lock(g_shared.mutex);
+        g_shared.status.last_file = items.front().path;
+        g_shared.status.destination = destination.id;
+    }
+    g_progress.cancel = false;
+    g_log.write("sending an album of %zu captures to %s", items.size(), destination.id.c_str());
+    const UploadOutcome outcome = upload_album(config, destination, items, games, &g_progress);
+    g_progress.sent = 0;
+    g_progress.total = 0;
+    for (const MediaItem &item : items)
+    {
+        HistoryEntry entry;
+        entry.time = now_seconds();
+        entry.ok = outcome.ok;
+        entry.destination = destination.id;
+        entry.path = item.path;
+        entry.detail = outcome.ok ? outcome.link : outcome.error;
+        history->append(entry);
+    }
+    {
+        std::lock_guard<std::mutex> lock(g_shared.mutex);
+        const int count = static_cast<int>(items.size());
+        (outcome.ok ? g_shared.status.uploaded : g_shared.status.failed) += count;
+        g_shared.status.last_error = outcome.ok ? std::string() : outcome.error;
+        g_shared.status.state = g_shared.paused ? "paused" : "watching";
+        g_shared.status.destination.clear();
+    }
+    if (outcome.ok)
+        g_log.write("sent the album of %zu", items.size());
+    else
+        g_log.write("album failed: %s", outcome.error.c_str());
+    return outcome;
 }
 
 // The destinations in also_send that have not had this capture yet.
@@ -1161,14 +1249,12 @@ int run()
         bool reload = false;
         bool rescan = false;
         bool paused = false;
-        std::deque<ManualJob> manual;
         {
             std::lock_guard<std::mutex> lock(g_shared.mutex);
             reload = g_shared.reload;
             rescan = g_shared.rescan;
             paused = g_shared.paused;
             g_shared.reload = g_shared.rescan = false;
-            manual.swap(g_shared.manual);
         }
         if (reload || file_mtime(paths.config()) != settings.mtime)
         {
@@ -1179,34 +1265,173 @@ int run()
         const Config &config = settings.config;
 
         // Captures the app asked for go first and ignore auto_upload and pause.
-        for (const ManualJob &job : manual)
+        // One at a time off the shared queue, so a CANCEL (which empties it)
+        // stops a whole "Send all".
+        while (!g_quit.load())
         {
+            // A Send all arrives one QUEUE at a time: let it land (half a second
+            // without a new one, three at most), so its first album fills up too.
+            for (int tries = 0; tries < 30 && !g_quit.load(); ++tries)
+            {
+                {
+                    std::lock_guard<std::mutex> lock(g_shared.mutex);
+                    if (g_shared.manual.empty() || !g_shared.manual.front().batch ||
+                        g_shared.manual.size() >= kAlbumSize ||
+                        std::chrono::steady_clock::now() - g_shared.last_queued >=
+                            std::chrono::milliseconds(500))
+                        break;
+                }
+                usleep(100000);
+            }
+            // The next job, and with a Send all of screenshots for one Telegram
+            // chat, up to kAlbumSize of them to go as one album.
+            std::vector<ManualJob> jobs;
+            std::vector<MediaItem> items;
+            const Destination *album = nullptr;
             {
                 std::lock_guard<std::mutex> lock(g_shared.mutex);
-                g_shared.current_job = job.id;
+                if (g_shared.manual.empty())
+                    break;
+                jobs.push_back(std::move(g_shared.manual.front()));
+                g_shared.manual.pop_front();
+                g_shared.current_job = jobs.front().id;
+                MediaItem first;
+                const Destination *to =
+                    jobs.front().batch && describe_media(jobs.front().path, &first)
+                        ? job_destination(config, jobs.front(), first)
+                        : nullptr;
+                // A clip this process reads as zeros goes alone, through the app (send_one).
+                const auto groupable = [&](const MediaItem &item)
+                {
+                    return to != nullptr && to->configured() &&
+                                   !(item.video() && capture_reads_blank(item.path))
+                               ? album_kind(*to, item)
+                               : AlbumKind::none;
+                };
+                const AlbumKind kind = groupable(first);
+                if (kind != AlbumKind::none)
+                {
+                    items.push_back(first);
+                    std::uint64_t total = first.size;
+                    const std::uint64_t limit = to->size_limit();
+                    while (jobs.size() < kAlbumSize && !g_shared.manual.empty())
+                    {
+                        const ManualJob &next = g_shared.manual.front();
+                        MediaItem more;
+                        if (!next.batch || !describe_media(next.path, &more) ||
+                            job_destination(config, next, more) != to || groupable(more) != kind ||
+                            (limit != 0 && total + more.size > limit))
+                            break;
+                        total += more.size;
+                        jobs.push_back(std::move(g_shared.manual.front()));
+                        g_shared.manual.pop_front();
+                        items.push_back(std::move(more));
+                    }
+                    if (jobs.size() > 1)
+                        album = to;
+                }
+                // Why a Send all capture for Telegram goes on its own, for the log.
+                if (album == nullptr && to != nullptr && to->type == DestinationType::telegram &&
+                    jobs.front().batch)
+                    g_log.write("%s goes alone (%s, %s): %s", first.file.c_str(),
+                                kind == AlbumKind::photo  ? "photo"
+                                : kind == AlbumKind::file ? "file"
+                                                          : "no album",
+                                human_size(first.size).c_str(),
+                                kind == AlbumKind::none ? "over the size limit or unreadable"
+                                                        : "nothing like it queued after it");
+                for (const ManualJob &each : jobs)
+                    g_shared.sending.push_back(each.id);
             }
-            MediaItem item;
-            UploadOutcome outcome;
-            if (describe_media(job.path, &item))
-                send_one(paths, config, &names, &history, item, false, job.destination, &outcome);
+            std::vector<UploadOutcome> outcomes(jobs.size());
+            if (album != nullptr)
+            {
+                const UploadOutcome sent = send_album(config, &names, &history, *album, items);
+                for (UploadOutcome &outcome : outcomes)
+                    outcome = sent;
+            }
             else
-                outcome.error = "The capture is gone";
-            if (outcome.destination.empty())
-                outcome.destination = job.destination;
-            std::string answer = outcome.ok ? "ok " : "failed ";
-            answer += outcome.destination + "\t" + (outcome.ok ? outcome.link : outcome.error);
-            for (char &c : answer)
-                if (c == '\n' || c == '\r')
-                    c = ' ';
             {
-                std::lock_guard<std::mutex> lock(g_shared.mutex);
-                g_shared.current_job = 0;
-                g_shared.results[job.id] = std::move(answer);
-                while (g_shared.results.size() > 64)
-                    g_shared.results.erase(g_shared.results.begin());
+                const ManualJob &job = jobs.front();
+                MediaItem item;
+                if (describe_media(job.path, &item))
+                    send_one(paths, config, &names, &history, item, false, job.destination,
+                             &outcomes.front(), job.batch);
+                else
+                    outcomes.front().error = "The capture is gone";
+                items = {item};
             }
-            if (g_quit.load())
-                break;
+            for (std::size_t i = 0; i < jobs.size(); ++i)
+            {
+                const ManualJob &job = jobs[i];
+                const MediaItem &item = items[i];
+                UploadOutcome &outcome = outcomes[i];
+                if (outcome.destination.empty())
+                    outcome.destination = job.destination;
+                // Deleted only once it has really gone somewhere. A payload may not
+                // be allowed to delete captures; then the app does it when it runs.
+                bool waiting = false;
+                if (outcome.ok && job.delete_after)
+                {
+                    std::string why;
+                    if (delete_capture(job.path, paths.photo_root, paths.video_root, &why))
+                    {
+                        g_log.write("deleted %s after sending it", item.file.c_str());
+                    }
+                    else
+                    {
+                        waiting = add_pending_delete(paths, job.path);
+                        g_log.write("could not delete %s (%s); %s", item.file.c_str(), why.c_str(),
+                                    waiting ? "PShare deletes it when it runs"
+                                            : "and could not list it for PShare either");
+                    }
+                }
+                std::string answer = outcome.ok ? "ok " : "failed ";
+                answer += outcome.destination + "\t" + (outcome.ok ? outcome.link : outcome.error);
+                for (char &c : answer)
+                    if (c == '\n' || c == '\r')
+                        c = ' ';
+                BatchTally finished;
+                bool batch_over = false;
+                {
+                    std::lock_guard<std::mutex> lock(g_shared.mutex);
+                    g_shared.current_job = 0;
+                    g_shared.sending.erase(
+                        std::remove(g_shared.sending.begin(), g_shared.sending.end(), job.id),
+                        g_shared.sending.end());
+                    g_shared.results[job.id] = std::move(answer);
+                    while (g_shared.results.size() > 64)
+                        g_shared.results.erase(g_shared.results.begin());
+                    if (job.batch)
+                    {
+                        BatchTally &tally = g_shared.batch;
+                        ++(outcome.ok ? tally.sent : tally.failed);
+                        if (outcome.ok && job.delete_after)
+                            ++(waiting ? tally.waiting : tally.deleted);
+                    }
+                    batch_over =
+                        g_shared.manual.empty() && g_shared.batch.sent + g_shared.batch.failed > 0;
+                    if (batch_over)
+                    {
+                        finished = g_shared.batch;
+                        g_shared.batch = BatchTally{};
+                    }
+                }
+                if (batch_over && config.notify)
+                {
+                    std::string text = "PShare: sent " + std::to_string(finished.sent) +
+                                       (finished.sent == 1 ? " capture" : " captures");
+                    if (finished.failed > 0)
+                        text += ", " + std::to_string(finished.failed) + " failed";
+                    if (finished.deleted > 0)
+                        text +=
+                            ", " + std::to_string(finished.deleted) + " deleted from the console";
+                    if (finished.waiting > 0)
+                        text += ", " + std::to_string(finished.waiting) +
+                                " to delete when PShare opens";
+                    notify(text);
+                }
+            }
         }
 
         const std::int64_t now = now_seconds();

@@ -109,6 +109,20 @@ class Page
         (void)feedback;
         (void)context;
     }
+    // Items the page puts at the top of the Options menu (tags from kPageMenuTag
+    // up), and what choosing one does.
+    static constexpr int kPageMenuTag = 100;
+    virtual void menu_items(std::vector<ui::MenuItem> &items, Context &context) const
+    {
+        (void)items;
+        (void)context;
+    }
+    virtual void menu_action(int tag, ui::Feedback &feedback, Context &context)
+    {
+        (void)tag;
+        (void)feedback;
+        (void)context;
+    }
 };
 
 std::unique_ptr<Page> make_captures_page();
