@@ -13,8 +13,8 @@
 
 **PShare sends your PS5 captures where you want them, the moment you take
 them.** Take a screenshot or save a clip with the Create button and PShare
-sends it to Discord, Telegram, catbox.moe, a USB drive, a shared folder
-on your PC or a dozen other places, automatically and in the background, even
+sends it to Discord, Telegram, catbox.moe, OneDrive, a USB drive, a shared folder
+on your PC or Mac or a dozen other places, automatically and in the background, even
 after you close the app. It doubles as a media gallery: browse every capture
 by game, watch clips with sound, and open anything on your phone from a QR
 code.
@@ -45,7 +45,7 @@ code.
   new screenshot and clip, waits until a clip has finished writing, and sends
   it. It keeps running after PShare closes.
 - **Many destinations.** Discord webhooks, Telegram bots, catbox.moe,
-  Litterbox, any multipart HTTP endpoint, a USB drive or console folder, and PC shares over SMB 2/3. Account-free hosts
+  Litterbox, any multipart HTTP endpoint, a USB drive or console folder, PC or Mac shares over SMB 2/3, and OneDrive. Account-free hosts
   (Uguu, tmpfiles.org, temp.sh, x0.at, Gofile) are set up out of the box.
 - **Smart routing.** Per-game destinations, size limits with fallbacks (a
   40 MB clip goes to catbox and Discord gets the link), and destinations that
@@ -62,6 +62,12 @@ code.
   can be browsed, streamed and downloaded. The setup page lets you paste
   webhooks and tokens from your phone instead of typing them with a
   controller.
+- **Send all, or a selection.** Send everything shown (all captures, one
+  kind, or one game) or the captures you select, skipping what was already
+  sent, to each game's usual destination or one you pick. It runs in the
+  background uploader, finishes after you close PShare, waits out rate limits,
+  and can delete each capture from the console once it has arrived. Selected
+  captures can also be deleted from the console in one go.
 - **History with QR codes.** Every upload, from the app or the background,
   with its link as a QR code to open on your phone. Failed ones can be
   retried.
@@ -84,6 +90,211 @@ code.
 `pshared.elf` is also published on its own and can be sent with any payload
 sender. It reads the same `/data/pshare/config.ini`.
 
+## Setting up destinations
+
+Each destination is set up in **Destinations** in the app or, easier for
+long webhooks and tokens, on the setup page (**Auto upload › Set up from your
+phone**). Open the one you want:
+
+<details>
+<summary><b>Discord</b> (webhook)</summary>
+
+1. In Discord, open the channel's **Edit Channel › Integrations › Webhooks**
+   and choose **New Webhook**.
+2. Name it if you like, then **Copy Webhook URL**.
+3. Paste it into **Discord › Webhook URL** in PShare.
+
+Discord takes files up to 20 MB on servers without boosts, 50 MB at boost
+level 2 and 100 MB at level 3. Set **Size limit** to match your server and
+pick where **Big files go to**: a file host (catbox by default) or OneDrive,
+and Discord gets a link anyone can open; or your Mac, PC or a USB drive, and
+Discord gets a note saying where the clip was saved.
+</details>
+
+<details>
+<summary><b>Telegram</b> (bot)</summary>
+
+1. Message [@BotFather](https://t.me/BotFather), send `/newbot` and follow
+   the prompts. It answers with the **bot token**.
+2. Add the bot to the chat, group or channel it should post in (as an admin
+   for a channel).
+3. Find the **chat ID**: send a message there, then open
+   `https://api.telegram.org/bot<token>/getUpdates` in a browser and look for
+   `"chat":{"id":...}`. Group and channel IDs start with `-100`.
+4. Enter the token and chat ID under **Telegram** in PShare.
+
+The Bot API takes files up to 50 MB, and photos up to 10 MB. A screenshot
+bigger than that (a 4K PNG, say) goes twice: a 2560 px copy as a photo, so it
+shows in the chat's photos, then the original as a file captioned
+"Full size". A **Send all** posts in albums of up to 10, each capture with its
+own caption: screenshots as photo albums (their full-size originals follow as
+albums of files), clips as albums of files, up to 50 MB an album.
+</details>
+
+<details>
+<summary><b>catbox.moe and Litterbox</b></summary>
+
+Both work without an account and are ready out of the box.
+
+- **catbox.moe** keeps files permanently (up to 200 MB). To see your uploads
+  in your catbox account, copy the **user hash** from your
+  [catbox.moe](https://catbox.moe) account page into **User hash**.
+- **Litterbox** keeps files for 1 hour to 3 days (up to 1 GB). Turn it on
+  and choose **Keep files for**.
+</details>
+
+<details>
+<summary><b>Uguu, tmpfiles.org, temp.sh, x0.at and Gofile</b></summary>
+
+Account-free hosts, set up out of the box. Turn one on, or pick it as the
+default or as Discord's **Big files go to**. How long each keeps files is up
+to the host (the app shows it in the name).
+
+| Host | Largest file |
+| --- | --- |
+| Uguu | 128 MB |
+| tmpfiles.org | 100 MB |
+| temp.sh | 4 GB |
+| x0.at | 1 GB (bigger files are kept for less time) |
+| Gofile | no stated limit |
+
+Their **Size limit** is set to match; a host can also send bigger files on to
+a **Big files go to** host of its own.
+</details>
+
+<details>
+<summary><b>OneDrive</b></summary>
+
+OneDrive needs an app registration of your own (free) and a refresh token
+for it. Do this once, on a PC or Mac:
+
+1. Sign in to [portal.azure.com](https://portal.azure.com) with your
+   Microsoft account and open **Microsoft Entra ID › App registrations › New
+   registration**. If the portal asks you to set up a directory or a free
+   Azure account first, do that; app registrations need one.
+2. Name it `PShare`, choose **Accounts in any organizational directory and
+   personal Microsoft accounts**, leave the redirect URI empty and
+   **Register**. Copy the **Application (client) ID** from its overview.
+3. Open **Authentication**, set **Allow public client flows** to **Yes** and
+   save.
+4. In a terminal (on Windows type `curl.exe`, not `curl`), ask for a sign-in
+   code. Replace `YOUR_CLIENT_ID` with your client ID, with no brackets or
+   quotes around it:
+
+   ```sh
+   curl -d client_id=YOUR_CLIENT_ID -d "scope=Files.ReadWrite offline_access" https://login.microsoftonline.com/common/oauth2/v2.0/devicecode
+   ```
+
+5. Open [microsoft.com/devicelogin](https://microsoft.com/devicelogin), enter
+   the short `user_code` from the answer, sign in and accept. Then, within
+   15 minutes, replace `YOUR_DEVICE_CODE` with the long `device_code` from
+   the same answer (a few hundred characters; not the `user_code`):
+
+   ```sh
+   curl -d client_id=YOUR_CLIENT_ID -d grant_type=urn:ietf:params:oauth:grant-type:device_code -d device_code=YOUR_DEVICE_CODE https://login.microsoftonline.com/common/oauth2/v2.0/token
+   ```
+
+6. Copy the `refresh_token` value (everything between its quotes). On the
+   setup page, under **OneDrive**, paste the **Client ID** and **Refresh
+   token**, pick a **Folder in OneDrive** (`PShare` by default) and turn it
+   on. Then use **Send a test** in the app.
+
+Captures land in `<folder>/<game>/`. PShare keeps the sign-in fresh by
+itself (in `/data/pshare/onedrive-<id>.token`); if OneDrive goes unused for
+about 90 days, or you change your password, repeat steps 4–6. Treat the
+refresh token like a password.
+
+If `curl` answers `AADSTS50059`, the app was registered for your directory
+only: in its **Authentication** page set the supported account types to
+**Accounts in any organizational directory and personal Microsoft
+accounts**. `AADSTS7000218` means **Allow public client flows** is still off.
+
+No **OneDrive** in the list? Your `config.ini` was written by an older
+version: add this to the file and reopen PShare:
+
+```ini
+[destination.onedrive]
+type = onedrive
+name = OneDrive
+path = PShare
+enabled = false
+```
+</details>
+
+<details>
+<summary><b>Your own server</b> (custom HTTP)</summary>
+
+Any endpoint that takes a `multipart/form-data` POST:
+
+1. Set **Upload URL**, and **File field** to the form field that carries the
+   file (`file` by default).
+2. Headers such as `Authorization: Bearer <key>` and extra form fields are
+   set on the setup page or in `config.ini` (`header = ...`,
+   `form.<name> = ...`).
+
+PShare reads the link from a `url` or `link` field in a JSON answer, or the
+first URL in the reply.
+</details>
+
+<details>
+<summary><b>USB drive or console storage</b></summary>
+
+1. Plug in a USB drive formatted exFAT or FAT32.
+2. Turn on **USB drive** in PShare and leave **Copy to** on **USB drive**, or
+   choose **Console storage** (`/data/pshare/Saved`).
+
+Captures land in `PShare/<game>/`. Turn on **Also gets every new capture** to
+keep a copy of everything besides the default destination.
+</details>
+
+<details>
+<summary><b>Windows PC shared folder</b> (SMB)</summary>
+
+1. On the PC, right-click a folder › **Properties › Sharing › Share…**, add
+   your account with **Read/Write**, and note the share name.
+2. Find the PC's address: run `ipconfig` and read the **IPv4 Address**.
+3. In PShare, open **My PC**: set **Share** to
+   `smb://<address>/<share name>` (optionally followed by `/<subfolder>`),
+   and enter your Windows **User name** and **Password**. Accounts that sign
+   in with a Microsoft account use its email address and password.
+4. Turn it on and use **Send a test**.
+
+A Samba share on Linux or a NAS works the same way.
+</details>
+
+<details>
+<summary><b>Mac shared folder</b> (SMB)</summary>
+
+1. On the Mac, open **System Settings › General › Sharing** and turn on
+   **File Sharing**.
+2. Click **ⓘ** next to it, add a folder under **Shared Folders** with **+**,
+   and give your account **Read & Write**.
+3. Still there, open **Options…**, turn on **Windows File Sharing** for your
+   account and enter its password. Without this the Mac refuses the
+   console's sign-in.
+4. Find the Mac's address: **System Settings › Wi-Fi** (or **Network**) ›
+   **Details…** › **IP address**.
+5. In PShare, open **My Mac**: set **Share** to
+   `smb://<address>/<folder name>`, **User name** to the account's short name
+   (its home folder's name) and **Password** to its password.
+6. Turn it on and use **Send a test**.
+
+Keep the Mac awake (**System Settings › Energy** or **Battery › Options**)
+so uploads don't fail while it sleeps.
+
+No **My Mac** in the list? Your `config.ini` was written by an older
+version: set up **My PC** the same way, or add this to the file and reopen
+PShare:
+
+```ini
+[destination.mac]
+type = smb
+name = My Mac
+url = smb://192.168.1.20/Captures
+enabled = false
+```
+</details>
+
 ## Controls
 
 The full list is also in the app under **Settings › Controls**.
@@ -97,7 +308,21 @@ The full list is also in the app under **Settings › Controls**.
 | L2 / R2 | All · screenshots · clips |
 | Touchpad | Choose a game and the order (also the two buttons right of the tabs) |
 | L1 / R1 | Switch sections |
-| Options | Menu |
+| Options | Menu: **Select captures**, **Send all shown…**, **Delete all shown…** |
+
+**Selecting captures** (Options › Select captures)
+
+| Button | Action |
+| --- | --- |
+| ✕ | Select or unselect a capture |
+| □ | Send the selected captures… |
+| △ | Select all shown / none |
+| Options | Send selected…, Delete selected… |
+| ○ | Done selecting |
+
+**Send…** asks where to (each game's usual destination, or one you pick),
+whether to skip captures already sent, and whether to delete each one from
+the console once it has arrived. Deleting asks first and can't be undone.
 
 **Clip player** (the same buttons as VLC for PS5 wherever the two apps overlap)
 
@@ -116,6 +341,12 @@ the PC uses the console's buttons. On a keyboard: Space play/pause, ← / →
 10 s, `[` / `]` 30 s, `S` send, `T` send to…, `,` / `.` newer / older, Esc
 back. On a phone, the buttons under the picture.
 
+**Browser gallery** (Captures, on the browser page): tick captures to
+**Send** or **Delete…** them, or **Send all** what the game filter shows,
+every page of it, skipping what was already sent. A delete asked from the
+browser waits for **Delete** on the PS5 (PShare must be open), so nobody on
+your network can delete captures without you.
+
 ## Configuration
 
 Everything is editable in the app or from your phone. The file behind it is
@@ -131,7 +362,7 @@ also_send = usb
 type = discord
 url = https://discord.com/api/webhooks/<id>/<token>
 message = {type} from **{game}** - {date} {time}
-max_mb = 10
+max_mb = 20
 fallback = catbox
 
 [title_destinations]
@@ -186,8 +417,9 @@ to the uploader, so the browser page, downloads and uploads all work. Keep
 PShare open, or reload the jailbreak.
 
 **Discord does not accept my clip.**
-Without server boosts Discord takes files up to 10 MB. Keep `max_mb = 10` and
-a `fallback` so bigger clips go to a file host and Discord gets the link.
+Without server boosts Discord takes files up to 20 MB (50 MB at boost level
+2, 100 MB at level 3). Set `max_mb` to your server's limit and keep a
+`fallback` so bigger clips go to a file host and Discord gets the link.
 
 ## Contributing
 

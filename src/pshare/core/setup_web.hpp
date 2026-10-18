@@ -71,7 +71,16 @@ struct GalleryFilter
     std::vector<GalleryGame> games; // for the choice list, most captures first
     std::string game;               // the one shown (title ID); empty = all
     bool oldest_first = false;
+    int page = 0;
+    int total = 0; // captures in the filter, every page
+    // Where Send can go: id and name of each destination that is on and set up.
+    std::vector<std::pair<std::string, std::string>> destinations;
 };
+// The gallery is one form, posted to /act: each card has a tick box named
+// "s.<n>" holding its path, and the bar under the grid sends or deletes the
+// ticked ones ("act" = send / delete), or sends the whole filter
+// ("act" = send-all, with "game"), to "d" (empty: each game's usual
+// destination), skipping what was sent before when "skip" is there.
 std::string gallery_page(const std::vector<GalleryItem> &items, int page_index, int pages,
                          std::string_view notice, const GalleryFilter &filter = {});
 

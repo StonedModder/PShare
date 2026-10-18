@@ -30,7 +30,8 @@ constexpr TypeInfo kTypes[] = {
     {DestinationType::litterbox, "litterbox", "Litterbox (temporary)"},
     {DestinationType::http, "http", "Custom HTTP endpoint"},
     {DestinationType::folder, "folder", "USB drive or folder"},
-    {DestinationType::smb, "smb", "PC shared folder"},
+    {DestinationType::smb, "smb", "PC or Mac shared folder"},
+    {DestinationType::onedrive, "onedrive", "OneDrive"},
 };
 
 constexpr std::uint64_t kMiB = 1024ull * 1024ull;
@@ -72,7 +73,7 @@ std::uint64_t Destination::size_limit() const
     switch (type)
     {
     case DestinationType::discord:
-        return 10 * kMiB; // servers without boosts
+        return 20 * kMiB; // servers without boosts (since August 2026)
     case DestinationType::telegram:
         return 50 * kMiB; // the Bot API's upload ceiling
     case DestinationType::catbox:
@@ -81,6 +82,23 @@ std::uint64_t Destination::size_limit() const
         return 1024 * kMiB;
     default:
         return 0; // the server decides
+    }
+}
+
+int Destination::service_ceiling_mb() const
+{
+    switch (type)
+    {
+    case DestinationType::discord:
+        return 100; // boost level 3; level 2 takes 50
+    case DestinationType::telegram:
+        return 50;
+    case DestinationType::catbox:
+        return 200;
+    case DestinationType::litterbox:
+        return 1024;
+    default:
+        return 0;
     }
 }
 
@@ -104,6 +122,8 @@ bool Destination::configured() const
         SmbAddress address;
         return parse_smb_url(url, &address, nullptr);
     }
+    case DestinationType::onedrive:
+        return !client_id.empty() && !token.empty();
     default:
         return false;
     }
@@ -220,7 +240,7 @@ default_destination = discord
 ; also_send = usb
 
 ; One section per destination: [destination.<id>]
-; type = discord | telegram | catbox | litterbox | http | folder | smb
+; type = discord | telegram | catbox | litterbox | http | folder | smb | onedrive
 ; message placeholders: {type} {game} {title_id} {date} {time} {file} {size} {link}
 
 [destination.discord]
@@ -230,9 +250,10 @@ name = Discord
 url =
 username = PShare
 message = {type} from **{game}** - {date} {time}
-; Discord refuses attachments over 10 MB on servers without boosts. Bigger
-; files go to the fallback and Discord gets the link instead.
-max_mb = 10
+; Discord takes attachments up to 20 MB on servers without boosts (50 MB at
+; boost level 2, 100 MB at level 3). Bigger files go to the fallback and
+; Discord gets the link instead.
+max_mb = 20
 fallback = catbox
 
 [destination.catbox]
@@ -293,7 +314,7 @@ type = http
 name = x0.at
 url = https://x0.at
 field = file
-max_mb = 222
+max_mb = 1024
 
 [destination.gofile]
 type = http
@@ -318,6 +339,30 @@ url = smb://192.168.1.10/Captures/PS5
 username =
 ; The account's password.
 token =
+enabled = false
+
+[destination.mac]
+type = smb
+name = My Mac
+; A shared folder on your Mac: smb://<mac address>/<shared folder>
+; (System Settings > General > Sharing > File Sharing: add the folder, then
+; Options... > turn on Windows File Sharing for your account).
+url = smb://192.168.1.20/Captures
+; The Mac account's short name (the name of its home folder).
+username =
+; The account's password.
+token =
+enabled = false
+
+[destination.onedrive]
+type = onedrive
+name = OneDrive
+; The Application (client) ID of your app registration at portal.azure.com,
+; and a refresh token for it (the README's OneDrive guide shows how).
+client_id =
+token =
+; Captures land in <path>/<game>/ in your OneDrive.
+path = PShare
 enabled = false
 
 [title_destinations]
@@ -379,11 +424,13 @@ void load_config(const IniDocument &document, Config *config, std::vector<std::s
         if (destination.token.empty())
             destination.token = std::string(trim(document.get_or(section, "userhash", "")));
         destination.chat_id = std::string(trim(document.get_or(section, "chat_id", "")));
+        destination.client_id = std::string(trim(document.get_or(section, "client_id", "")));
         destination.username = document.get_or(section, "username", "");
         destination.message = document.get_or(section, "message", "");
         destination.field = document.get_or(section, "field", "file");
         destination.litterbox_time = document.get_or(section, "litterbox_time", "72h");
-        destination.path = std::string(trim(document.get_or(section, "path", "usb")));
+        destination.path = std::string(trim(document.get_or(
+            section, "path", destination.type == DestinationType::onedrive ? "PShare" : "usb")));
         destination.max_mb = static_cast<int>(document.get_int(section, "max_mb", 0));
         destination.fallback = document.get_or(section, "fallback", "");
         destination.enabled = document.get_bool(section, "enabled", true);
@@ -450,7 +497,8 @@ void store_config(const Config &config, IniDocument *document)
             document->set(s, "name", d.name);
         const bool url_used =
             d.type != DestinationType::catbox && d.type != DestinationType::folder &&
-            d.type != DestinationType::litterbox && d.type != DestinationType::telegram;
+            d.type != DestinationType::litterbox && d.type != DestinationType::telegram &&
+            d.type != DestinationType::onedrive;
         if (url_used || !d.url.empty())
             document->set(s, "url", d.url);
         if (d.type != DestinationType::discord && d.type != DestinationType::http &&
@@ -477,8 +525,10 @@ void store_config(const Config &config, IniDocument *document)
         }
         if (d.type == DestinationType::litterbox)
             document->set(s, "litterbox_time", d.litterbox_time);
-        if (d.type == DestinationType::folder)
+        if (d.type == DestinationType::folder || d.type == DestinationType::onedrive)
             document->set(s, "path", d.path);
+        if (d.type == DestinationType::onedrive)
+            document->set(s, "client_id", d.client_id);
         if (d.type == DestinationType::smb)
             document->set(s, "username", d.username);
         if (d.max_mb > 0 || document->get(s, "max_mb", nullptr))
