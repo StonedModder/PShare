@@ -50,6 +50,9 @@ std::string expand(std::string_view pattern, const Placeholder *values, std::siz
 bool json_find_string(std::string_view json, std::string_view key, std::string *value);
 // The same for true/false.
 bool json_find_bool(std::string_view json, std::string_view key, bool *value);
+// The same, but only a key of the outermost object (not one inside a nested
+// object or list), with the same light unescaping.
+bool json_top_string(std::string_view json, std::string_view key, std::string *value);
 // The first http:// or https:// URL in a text, up to whitespace or a quote.
 bool find_url(std::string_view text, std::string *url);
 
