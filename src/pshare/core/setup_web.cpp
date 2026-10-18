@@ -765,13 +765,6 @@ std::string setup_page(const Config &config, std::string_view notice, bool notic
                          "https://discord.com/api/webhooks/...");
             text_field(&body, prefix + "username", "Post as", d.username);
             text_field(&body, prefix + "message", "Message", d.message);
-            body += "<div class=\"row\"><div>";
-            text_field(&body, prefix + "max_mb", "Size limit (MB)", std::to_string(d.max_mb),
-                       "number");
-            body += "</div><div>";
-            text_field(&body, prefix + "fallback", "Bigger files go to", d.fallback, "text",
-                       "catbox");
-            body += "</div></div>";
             break;
         case DestinationType::telegram:
             secret_field(&body, prefix + "token", "Bot token", d.token);
@@ -795,6 +788,11 @@ std::string setup_page(const Config &config, std::string_view notice, bool notic
             text_field(&body, prefix + "username", "Account", d.username);
             secret_field(&body, prefix + "token", "Password", d.token);
             break;
+        case DestinationType::onedrive:
+            text_field(&body, prefix + "client_id", "Client ID", d.client_id);
+            secret_field(&body, prefix + "token", "Refresh token", d.token);
+            text_field(&body, prefix + "path", "Folder in OneDrive", d.path, "text", "PShare");
+            break;
         case DestinationType::http:
         case DestinationType::count:
             text_field(&body, prefix + "url", "Upload URL", d.url, "url");
@@ -807,6 +805,19 @@ std::string setup_page(const Config &config, std::string_view notice, bool notic
                 body += " placeholder=\"Saved. Type new ones to replace them.\"";
             body += "></textarea>";
             break;
+        }
+        if (d.has_size_limit())
+        {
+            const int ceiling = d.service_ceiling_mb();
+            body += "<div class=\"row\"><div>";
+            text_field(&body, prefix + "max_mb",
+                       ceiling > 0 ? "Size limit (MB, up to " + std::to_string(ceiling) + ")"
+                                   : std::string("Size limit (MB, 0: none)"),
+                       std::to_string(d.max_mb), "number");
+            body += "</div><div>";
+            text_field(&body, prefix + "fallback", "Bigger files go to", d.fallback, "text",
+                       "catbox");
+            body += "</div></div>";
         }
         body += "</section>";
     }
@@ -852,6 +863,7 @@ int apply_setup_form(const std::map<std::string, std::string> &form, Config *con
             changed += set_text(&d.url, form, prefix + "url");
         changed += set_secret(&d.token, form, prefix + "token");
         changed += set_text(&d.chat_id, form, prefix + "chat_id");
+        changed += set_text(&d.client_id, form, prefix + "client_id");
         changed += set_text(&d.username, form, prefix + "username");
         changed += set_text(&d.message, form, prefix + "message");
         changed += set_text(&d.field, form, prefix + "field");
@@ -874,7 +886,8 @@ int apply_setup_form(const std::map<std::string, std::string> &form, Config *con
                 }
             }
         }
-        changed += set_int(&d.max_mb, form, prefix + "max_mb", 0, 100000, errors);
+        changed += set_int(&d.max_mb, form, prefix + "max_mb", 0,
+                           d.service_ceiling_mb() > 0 ? d.service_ceiling_mb() : 100000, errors);
         {
             std::string fallback = d.fallback;
             if (set_text(&fallback, form, prefix + "fallback"))
