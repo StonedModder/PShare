@@ -1,4 +1,4 @@
-// PShare - "Sending" without the internet: a copy on a drive or on a PC share.
+// PShare - "Sending" without the internet: a copy on a drive or on a PC or Mac share.
 // Copyright (C) 2026 PShare contributors
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
@@ -6,8 +6,8 @@
 //   folder  copies to <drive>/PShare/<game>/<file> on a USB stick or the
 //           extended storage ("usb" picks the first drive that is there), or
 //           to any absolute folder;
-//   smb     writes to a shared folder on a PC with libsmb2 (SMB 2/3, the
-//           protocol of a Windows share and of Samba).
+//   smb     writes to a shared folder on a PC or Mac with libsmb2 (SMB 2/3,
+//           the protocol of a Windows share, macOS File Sharing and Samba).
 // Both write under a temporary name and rename at the end, so a cancelled or
 // broken copy never leaves a half file that looks finished.
 
@@ -40,7 +40,7 @@ UploadOutcome copy_to_folder(const Destination &destination, const Paths &paths,
                              UploadProgress *progress);
 
 // Implemented in upload_smb.cpp (libsmb2); builds without libsmb2 report that
-// the PC share is not available.
+// the share is not available.
 UploadOutcome copy_to_share(const Destination &destination, const MediaItem &item,
                             const std::string &game, UploadProgress *progress);
 

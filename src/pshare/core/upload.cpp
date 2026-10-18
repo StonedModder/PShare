@@ -8,6 +8,7 @@
 
 #include "pshare/core/text.hpp"
 
+#include <algorithm>
 #include <unistd.h>
 
 namespace pshare
@@ -191,6 +192,8 @@ bool plan_request(const Destination &destination, const MediaItem &item, const C
     case DestinationType::folder:
     case DestinationType::smb:
         return fail("Drives and shares are copied, not sent over HTTP");
+    case DestinationType::onedrive:
+        return fail("OneDrive is sent in several requests, not one");
     default:
         return fail("Unknown destination type");
     }
@@ -204,6 +207,10 @@ ResponseVerdict read_response(DestinationType type, long status, const std::stri
     const bool success = status >= 200 && status < 300;
     // Rate limits and server trouble are worth another try; a 4xx is not.
     verdict.retry = status == 0 || status == 408 || status == 429 || status >= 500;
+    // Telegram: "parameters":{"retry_after":35}; Discord: "retry_after":1.5.
+    double wait = 0.0;
+    if (status == 429 && json_find_number(body, "retry_after", &wait))
+        verdict.retry_after = static_cast<int>(std::min(wait, 600.0)) + 1;
     switch (type)
     {
     case DestinationType::discord:
@@ -328,7 +335,16 @@ Attempt send_with_retries(const Config &config, const Destination &destination,
         if (progress != nullptr)
             progress->stage = 4;
         if (pause)
-            usleep(static_cast<useconds_t>(2000000 * attempt)); // 2 s, 4 s, ...
+        {
+            // As long as a rate limit asks, else 2 s, 4 s, ...; a cancel ends the wait.
+            const int seconds = verdict.retry_after > 0 ? verdict.retry_after : 2 * attempt;
+            for (int tenth = 0; tenth < seconds * 10; ++tenth)
+            {
+                if (progress != nullptr && progress->cancel.load())
+                    break;
+                usleep(100000);
+            }
+        }
     }
     return result;
 }
@@ -354,6 +370,9 @@ UploadOutcome upload_capture_with(const Config &config, const Destination &desti
         return copy_to_folder(destination, Paths{}, item, game, progress);
     if (destination.type == DestinationType::smb)
         return copy_to_share(destination, item, game, progress);
+    if (destination.type == DestinationType::onedrive)
+        return send_to_onedrive(config, destination, item, game, progress, transport, user,
+                                pause_between_tries, Paths{}.onedrive_token(destination.id));
     UploadOutcome outcome;
     outcome.destination = destination.id;
     const CaptionInfo caption = caption_info(item, game);
@@ -379,8 +398,31 @@ UploadOutcome upload_capture_with(const Config &config, const Destination &desti
         }
         if (progress != nullptr)
             progress->stage = 2;
-        const Attempt hosted = send_with_retries(config, *fallback, item, caption, {}, progress,
-                                                 transport, user, pause_between_tries);
+        Attempt hosted;
+        if (fallback->local() || fallback->type == DestinationType::onedrive)
+        {
+            // A drive, a share or OneDrive keeps it; the post says where it went
+            // (OneDrive with a link the chat can open).
+            const UploadOutcome kept =
+                fallback->type == DestinationType::folder
+                    ? copy_to_folder(*fallback, Paths{}, item, game, progress)
+                : fallback->type == DestinationType::smb
+                    ? copy_to_share(*fallback, item, game, progress)
+                    : send_to_onedrive(config, *fallback, item, game, progress, transport, user,
+                                       pause_between_tries, Paths{}.onedrive_token(fallback->id),
+                                       true);
+            hosted.ok = kept.ok;
+            hosted.attempts = kept.attempts;
+            hosted.error = kept.error;
+            hosted.link = fallback->local() ? "Too big to attach here; saved to " +
+                                                  fallback->display_name() + " (" + item.file + ")"
+                                            : kept.link;
+        }
+        else
+        {
+            hosted = send_with_retries(config, *fallback, item, caption, {}, progress, transport,
+                                       user, pause_between_tries);
+        }
         outcome.attempts += hosted.attempts;
         if (!hosted.ok)
         {

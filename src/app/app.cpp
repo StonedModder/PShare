@@ -126,6 +126,16 @@ void App::switch_page(int index, ui::Feedback &feedback, bool focus_content)
 void App::open_menu(ui::Feedback &feedback)
 {
     std::vector<ui::MenuItem> items;
+    if (content_focus_)
+    {
+        pages_[static_cast<std::size_t>(current_)]->menu_items(items, context_);
+        if (!items.empty())
+        {
+            ui::MenuItem separator;
+            separator.separator = true;
+            items.push_back(separator);
+        }
+    }
     ui::MenuItem rescan;
     rescan.label = "Look for new captures";
     rescan.tag = menu_rescan;
@@ -133,7 +143,7 @@ void App::open_menu(ui::Feedback &feedback)
     ui::MenuItem cancel;
     cancel.label = "Cancel uploads";
     cancel.tag = menu_cancel;
-    cancel.disabled = !upload_.active && upload_.queued == 0;
+    cancel.disabled = !upload_.active && upload_.queued == 0 && !upload_.batch;
     items.push_back(cancel);
     ui::MenuItem separator;
     separator.separator = true;
@@ -169,6 +179,7 @@ void App::handle_event(const ModelEvent &event, ui::Feedback &feedback)
                      "PShare has no write access to /data/pshare");
         break;
     case EventKind::deleted:
+    case EventKind::batch_finished:
         toasts_.push(event.ok ? ui::StatusKind::success : ui::StatusKind::danger, event.title,
                      event.detail);
         break;
@@ -249,6 +260,10 @@ void App::update(const InputFrame &input, float dt, ui::Feedback &feedback)
             {
                 quit_ = true;
             }
+            else if (tag >= Page::kPageMenuTag)
+            {
+                page.menu_action(tag, feedback, context_);
+            }
         }
     }
     else if (input.is_pressed(Action::menu) && !page.modal())
@@ -288,9 +303,9 @@ void App::update(const InputFrame &input, float dt, ui::Feedback &feedback)
     link_panel_.update(dt);
     menu_.update(dt);
     toasts_.update(dt, feedback);
-    upload_show_.target = upload_.active ? 1.0f : 0.0f;
+    upload_show_.target = upload_.active || upload_.batch ? 1.0f : 0.0f;
     upload_show_.update(dt, 10.0f);
-    if (upload_.active && upload_.total > 0)
+    if ((upload_.active || upload_.batch) && upload_.total > 0)
         upload_progress_.set_value(static_cast<float>(upload_.sent) /
                                    static_cast<float>(upload_.total));
     else if (!upload_.active)
@@ -369,6 +384,13 @@ void App::draw_upload_bar(ui::Canvas &canvas) const
     const UploadJob &job = upload_.job;
     std::string line = std::string(job.video ? "Sending clip" : "Sending screenshot") + " to " +
                        job.destination_name;
+    // A Send all: how far it has got, whoever is sending this one.
+    const std::string of_batch =
+        upload_.batch ? std::to_string(std::min(upload_.batch_done + 1, upload_.batch_total)) +
+                            " of " + std::to_string(upload_.batch_total)
+                      : std::string();
+    if (upload_.batch)
+        line = "Sending " + of_batch + " to " + upload_.batch_destination;
     if (upload_.stage == 2)
         line = "Hosting the big file first";
     else if (upload_.stage == 3)
@@ -384,7 +406,9 @@ void App::draw_upload_bar(ui::Canvas &canvas) const
                             : 0;
     std::snprintf(amount, sizeof(amount), "%d%%", percent);
     std::string detail = job.game + " · " + human_size(job.size);
-    if (upload_.queued > 0)
+    if (upload_.batch && !upload_.active)
+        detail = "Goes on after you close PShare · Options to cancel";
+    else if (upload_.queued > 0)
         detail += " · " + std::to_string(upload_.queued) + " waiting";
     ui::text(list, fonts_.mono, amount, bar.x + bar.w - 24.0f, bar.y + 32.0f, 22.0f,
              rgb(palette::aqua), gfx::Align::right);
