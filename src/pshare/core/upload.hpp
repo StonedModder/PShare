@@ -40,18 +40,25 @@ struct FormPart
 enum class BodyKind : std::uint8_t
 {
     multipart,
-    raw_file, // the file itself is the request body
+    raw_file, // the file itself (or a slice of it) is the request body
+    text,     // `text` is the body
     none,
 };
 
 struct HttpRequest
 {
     std::string url;
+    std::string method; // empty: POST
     std::vector<std::string> headers;
     BodyKind body = BodyKind::multipart;
     std::vector<FormPart> parts;
     std::string raw_path;
-    std::string raw_type;
+    std::string raw_type; // the content type of a raw_file or text body
+    // raw_file: the slice of the file to send; a zero length sends all of it.
+    // Progress then counts from raw_offset and keeps the whole file's total.
+    std::uint64_t raw_offset = 0;
+    std::uint64_t raw_length = 0;
+    std::string text;
     std::uint64_t upload_size = 0; // for progress
 };
 
@@ -131,5 +138,13 @@ UploadOutcome upload_capture_with(const Config &config, const Destination &desti
                                   const MediaItem &item, const std::string &game,
                                   UploadProgress *progress, Transport transport, void *user,
                                   bool pause_between_tries);
+
+// OneDrive takes several requests (sign in, open an upload session, send the
+// slices), so it has its own sequence; implemented in upload_onedrive.cpp.
+// `token_file` keeps the refresh token Microsoft hands back (Paths::onedrive_token).
+UploadOutcome send_to_onedrive(const Config &config, const Destination &destination,
+                               const MediaItem &item, const std::string &game,
+                               UploadProgress *progress, Transport transport, void *user,
+                               bool pause_between_tries, const std::string &token_file);
 
 } // namespace pshare

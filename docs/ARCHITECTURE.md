@@ -140,7 +140,7 @@ src/main.cpp         console entry point
 src/app/             the app: model (workers, pshared hand-off), pages, clip player,
                      video decoder, thumbnails, look
 src/pshare/core/     shared by the app, pshared and the tests: config and INI, captures,
-                     uploads (curl, SMB, folder), history, watcher, net, web pages
+                     uploads (curl, OneDrive, SMB, folder), history, watcher, net, web pages
 src/elevation/       Lapy client
 src/runtime/         heap, libc additions the console's runtime lacks
 src/ui, src/gfx, src/audio, src/platform, src/core
