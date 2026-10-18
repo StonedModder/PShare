@@ -84,6 +84,101 @@ code.
 `pshared.elf` is also published on its own and can be sent with any payload
 sender. It reads the same `/data/pshare/config.ini`.
 
+## Setting up destinations
+
+Each destination is set up in **Destinations** in the app or, easier for
+long webhooks and tokens, on the setup page (**Auto upload › Set up from your
+phone**). Open the one you want:
+
+<details>
+<summary><b>Discord</b> (webhook)</summary>
+
+1. In Discord, open the channel's **Edit Channel › Integrations › Webhooks**
+   and choose **New Webhook**.
+2. Name it if you like, then **Copy Webhook URL**.
+3. Paste it into **Discord › Webhook URL** in PShare.
+
+Without server boosts Discord refuses files over 10 MB. Keep **Size limit**
+at 10 MB and pick a **Big files go to** host (catbox by default) so bigger
+clips are uploaded there and Discord gets the link.
+</details>
+
+<details>
+<summary><b>Telegram</b> (bot)</summary>
+
+1. Message [@BotFather](https://t.me/BotFather), send `/newbot` and follow
+   the prompts. It answers with the **bot token**.
+2. Add the bot to the chat, group or channel it should post in (as an admin
+   for a channel).
+3. Find the **chat ID**: send a message there, then open
+   `https://api.telegram.org/bot<token>/getUpdates` in a browser and look for
+   `"chat":{"id":...}`. Group and channel IDs start with `-100`.
+4. Enter the token and chat ID under **Telegram** in PShare.
+
+The Bot API takes files up to 50 MB.
+</details>
+
+<details>
+<summary><b>catbox.moe and Litterbox</b></summary>
+
+Both work without an account and are ready out of the box.
+
+- **catbox.moe** keeps files permanently (up to 200 MB). To see your uploads
+  in your catbox account, copy the **user hash** from your
+  [catbox.moe](https://catbox.moe) account page into **User hash**.
+- **Litterbox** keeps files for 1 hour to 3 days (up to 1 GB). Turn it on
+  and choose **Keep files for**.
+</details>
+
+<details>
+<summary><b>Uguu, tmpfiles.org, temp.sh, x0.at and Gofile</b></summary>
+
+Account-free hosts, set up out of the box. Turn one on, or pick it as the
+default or as Discord's **Big files go to**. How long each keeps files is up
+to the host (the app shows it in the name).
+</details>
+
+<details>
+<summary><b>Your own server</b> (custom HTTP)</summary>
+
+Any endpoint that takes a `multipart/form-data` POST:
+
+1. Set **Upload URL**, and **File field** to the form field that carries the
+   file (`file` by default).
+2. Headers such as `Authorization: Bearer <key>` and extra form fields are
+   set on the setup page or in `config.ini` (`header = ...`,
+   `form.<name> = ...`).
+
+PShare reads the link from a `url` or `link` field in a JSON answer, or the
+first URL in the reply.
+</details>
+
+<details>
+<summary><b>USB drive or console storage</b></summary>
+
+1. Plug in a USB drive formatted exFAT or FAT32.
+2. Turn on **USB drive** in PShare and leave **Copy to** on **USB drive**, or
+   choose **Console storage** (`/data/pshare/Saved`).
+
+Captures land in `PShare/<game>/`. Turn on **Also gets every new capture** to
+keep a copy of everything besides the default destination.
+</details>
+
+<details>
+<summary><b>Windows PC shared folder</b> (SMB)</summary>
+
+1. On the PC, right-click a folder › **Properties › Sharing › Share…**, add
+   your account with **Read/Write**, and note the share name.
+2. Find the PC's address: run `ipconfig` and read the **IPv4 Address**.
+3. In PShare, open **My PC**: set **Share** to
+   `smb://<address>/<share name>` (optionally followed by `/<subfolder>`),
+   and enter your Windows **User name** and **Password**. Accounts that sign
+   in with a Microsoft account use its email address and password.
+4. Turn it on and use **Send a test**.
+
+A Samba share on Linux or a NAS works the same way.
+</details>
+
 ## Controls
 
 The full list is also in the app under **Settings › Controls**.
