@@ -30,7 +30,7 @@ for source in "${sources[@]}"; do
     object="$build/obj/${relative//\//_}.o"
     ninja_inputs=("$source" "$cxx")
     ninja_edge CXX "$object" "${compiler_cache[@]}" "$cxx" "${flags[@]}" -pthread \
-        -DGL_GLEXT_PROTOTYPES=1 -I"$root/src" -MD -MF "$object.d" -c "$source" -o "$object"
+        -DGL_GLEXT_PROTOTYPES=1 $(pkg-config --cflags libavformat) -I"$root/src" -MD -MF "$object.d" -c "$source" -o "$object"
     objects+=("$object")
 done
 for source in "${c_sources[@]}"; do
@@ -46,5 +46,5 @@ ninja_inputs=("${objects[@]}" "$cxx")
 # the GL library is linked only to resolve the names. Vendored C (stb) builds
 # without sanitizers: it shifts signed values on purpose.
 ninja_edge LINK "$build/pshare_tests" "$cxx" "${flags[@]}" -pthread "${objects[@]}" \
-    -lcurl -lGL -o "$build/pshare_tests"
+    -lcurl -lGL $(pkg-config --libs libavformat libavcodec libavutil libswscale libswresample) -o "$build/pshare_tests"
 ninja_run

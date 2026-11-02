@@ -19,7 +19,7 @@ eval "$(bash "$root/tools/setup-native-dependencies.sh" | grep '^SDK_ROOT=')"
 sdk=${SDK_ROOT:?payload SDK missing; run make deps}
 [[ -x $sdk/bin/prospero-clang++ ]] || { echo "the payload SDK has no prospero-clang++" >&2; exit 2; }
 
-resolution=$(bash "$root/tools/setup-pacbrew-dependencies.sh" --resolve libcurl libsmb2)
+resolution=$(bash "$root/tools/setup-pacbrew-dependencies.sh" --resolve libcurl libsmb2 libavformat libavcodec libavutil libswscale libswresample)
 mapfile -d '' -t curl_cflags < <(python3 -c \
     'import json,sys; sys.stdout.write("\0".join(json.loads(sys.argv[1])["cflags"]))' "$resolution")
 mapfile -d '' -t curl_libs < <(python3 -c \

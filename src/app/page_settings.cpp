@@ -25,6 +25,7 @@ enum RowId
     row_config,
     row_access,
     row_logs,
+    row_convert_webm,
     row_controls = 100, // value rows from here on: the controls list
 };
 
@@ -99,6 +100,9 @@ class SettingsPage final : public Page
                 break;
             case row_clips:
                 config.upload_videos = form_.toggle_value(row_clips);
+                break;
+            case row_convert_webm:
+                config.convert_webm = form_.toggle_value(row_convert_webm);
                 break;
             case row_existing:
                 config.upload_existing = form_.toggle_value(row_existing);
@@ -176,6 +180,8 @@ class SettingsPage final : public Page
         form_.add_toggle(row_notify, "Console notifications", config.notify).description =
             "A notification for every upload the background uploader makes";
         form_.add_header("How");
+        form_.add_toggle(row_convert_webm, "Convert WebM to MP4", config.convert_webm).description =
+            "All exports, up to 1080p/30 with sound. Uses CPU; original stays unchanged";
         form_.add_stepper(row_retries, "Tries per upload", config.retries, 1, 10);
         form_.add_stepper(row_poll, "Look for new captures every", config.poll_seconds, 1, 60)
             .stepper.set_suffix(" s");

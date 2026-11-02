@@ -203,6 +203,8 @@ std::string default_config_text()
 [general]
 ; Send new captures as soon as they are saved, while pshared runs.
 auto_upload = true
+; Convert WebM before any export: H.264/AAC MP4, up to 1080p/30. Uses CPU.
+convert_webm = false
 upload_screenshots = true
 upload_videos = true
 ; Also send captures that existed before pshared first started.
@@ -339,6 +341,7 @@ void load_config(const IniDocument &document, Config *config, std::vector<std::s
     out.upload_screenshots = document.get_bool(g, "upload_screenshots", out.upload_screenshots);
     out.upload_videos = document.get_bool(g, "upload_videos", out.upload_videos);
     out.upload_existing = document.get_bool(g, "upload_existing", out.upload_existing);
+    out.convert_webm = document.get_bool(g, "convert_webm", false);
     out.notify = document.get_bool(g, "notify", out.notify);
     out.keep_logs = document.get_bool(g, "keep_logs", out.keep_logs);
     out.poll_seconds = static_cast<int>(document.get_int(g, "poll_seconds", out.poll_seconds));
@@ -387,6 +390,11 @@ void load_config(const IniDocument &document, Config *config, std::vector<std::s
         destination.max_mb = static_cast<int>(document.get_int(section, "max_mb", 0));
         destination.fallback = document.get_or(section, "fallback", "");
         destination.enabled = document.get_bool(section, "enabled", true);
+        // Migrate the early per-Telegram setting unless a global value exists.
+        if (!document.get(g, "convert_webm", nullptr) &&
+            destination.type == DestinationType::telegram &&
+            document.get_bool(section, "convert_webm", false))
+            out.convert_webm = true;
         for (const std::string &key : document.keys(section))
         {
             if (starts_with(lower(key), "header"))
@@ -423,6 +431,7 @@ void store_config(const Config &config, IniDocument *document)
     document->set_bool(g, "upload_screenshots", config.upload_screenshots);
     document->set_bool(g, "upload_videos", config.upload_videos);
     document->set_bool(g, "upload_existing", config.upload_existing);
+    document->set_bool(g, "convert_webm", config.convert_webm);
     document->set_int(g, "poll_seconds", config.poll_seconds);
     document->set_int(g, "settle_seconds", config.settle_seconds);
     document->set_int(g, "retries", config.retries);
@@ -460,7 +469,10 @@ void store_config(const Config &config, IniDocument *document)
             document->set(s, "token", d.token);
         }
         if (d.type == DestinationType::telegram)
+        {
             document->set(s, "chat_id", d.chat_id);
+            document->remove_key(s, "convert_webm");
+        }
         if (d.type == DestinationType::discord)
             document->set(s, "username", d.username);
         if (!d.message.empty() || document->get(s, "message", nullptr))

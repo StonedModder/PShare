@@ -55,7 +55,7 @@ data asked for.
 | Command | Reply |
 | --- | --- |
 | `PING` | `pong pshared <version> <build>` |
-| `STATUS` / `STATUS app` | one `key=value` per line: state, counters, `job=`, `sent=`, `total=`, `ip=`. `STATUS app` also tells pshared the app is open, which keeps the web page up |
+| `STATUS` / `STATUS app` | one `key=value` per line: state, counters, `job=`, `sent=`, `total=`, `stage=`, `ip=`. `STATUS app` also tells pshared the app is open, which keeps the web page up |
 | `PAUSE` / `RESUME` | stop or restart automatic uploads |
 | `RELOAD` | read `config.ini` again |
 | `RESCAN` | look at the capture folders now |
@@ -169,3 +169,24 @@ code builds for the PC.
 * `fcntl` is wrapped for curl on sandboxed sockets.
 * Lapy's resident service exits at once unless a ps5log server is configured,
   so PShare ships the one-shot helper, as ProsperoStore does.
+
+## Telegram video preparation
+
+The shared upload path calls `video_split.cpp` for oversized Telegram videos.
+A first demux pass measures keyframe groups; a second pass copies compressed
+packets into independently muxed parts, preserving a common audio/video time
+offset. No decoder or encoder is opened. Completed files are checked against
+the byte limit before upload. `VideoParts` owns the temporary directory and
+removes it on ordinary return, failure and cancellation. Both the native app
+and payload link PacBrew libavformat/libavcodec/libavutil. Progress stage 5
+means preparing parts; upload progress then applies to the current part.
+
+With the global `[general] convert_webm` option enabled, `video_convert.cpp`
+first prepares an H.264/AAC MP4. The converted `MediaItem` then re-enters the
+shared upload path with conversion disabled, so every destination receives MP4
+and size-based splitting operates on the finished MP4. Original metadata is retained and temporary resources use
+the same `VideoParts` owner. Video uses a two-thread decoder and two-thread
+x264 encoder; audio is resampled to 48 kHz stereo and buffered in an audio FIFO
+for AAC frame sizes. Codecs are drained at EOF and the MP4 uses faststart.
+Stage 6 reports conversion progress by media time, before upload bytes or part
+bytes take over. Both binaries also link libswscale and libswresample.

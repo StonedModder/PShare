@@ -367,7 +367,9 @@ class DestinationsPage final : public Page
                     limit = static_cast<int>(i);
             }
             form_.add_choice(row_limit, "Size limit", std::move(limits), limit).description =
-                "Bigger files go to the fallback, and the link is posted instead";
+                d->type == DestinationType::telegram
+                    ? "Large videos are split into numbered parts"
+                    : "Bigger files go to the fallback, and the link is posted instead";
             std::vector<std::string> fallbacks = {"None"};
             fallback_ids_ = {""};
             int chosen = 0;

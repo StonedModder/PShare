@@ -275,6 +275,7 @@ std::string handle_command(std::string_view line)
             status.setup_port = 0;
         status.job = g_shared.current_job;
         std::string reply = status.serialize();
+        reply += "stage=" + std::to_string(g_progress.stage.load()) + "\n";
         reply += "sent=" + std::to_string(g_progress.sent.load()) + "\n";
         reply += "total=" + std::to_string(g_progress.total.load()) + "\n";
         return reply;

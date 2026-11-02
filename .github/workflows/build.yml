@@ -52,7 +52,8 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install --yes clang-18 clang-format-18 lld-18 llvm-18 make ninja-build ccache \
-            pkg-config tar unzip wget git libcurl4-openssl-dev libgl-dev
+            pkg-config tar unzip wget git libcurl4-openssl-dev libgl-dev \
+            libavformat-dev libavcodec-dev libavutil-dev libswscale-dev libswresample-dev ffmpeg
           sudo ln -sf /usr/bin/clang-18 /usr/local/bin/clang
           sudo ln -sf /usr/bin/clang++-18 /usr/local/bin/clang++
 

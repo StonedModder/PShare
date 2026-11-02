@@ -47,6 +47,12 @@ code.
 - **Many destinations.** Discord webhooks, Telegram bots, catbox.moe,
   Litterbox, any multipart HTTP endpoint, a USB drive or console folder, and PC shares over SMB 2/3. Account-free hosts
   (Uguu, tmpfiles.org, temp.sh, x0.at, Gofile) are set up out of the box.
+- **MP4 export.** Enable **Convert WebM to MP4** in Settings to prepare
+  H.264/AAC video up to 1080p/30 for any upload destination, USB/folder or SMB
+  share. Originals stay intact.
+- **Telegram video parts.** Large clips are split automatically into numbered,
+  independently playable parts below the bot upload limit, without re-encoding.
+  WebM is sent as a document when MP4 conversion is disabled.
 - **Smart routing.** Per-game destinations, size limits with fallbacks (a
   40 MB clip goes to catbox and Discord gets the link), and destinations that
   receive every capture as well, such as a copy on a USB stick.

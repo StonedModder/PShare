@@ -362,6 +362,7 @@ bool Model::send_through_daemon(const UploadJob &job, UploadOutcome *outcome)
             {
                 progress_.total = status.total > 0 ? status.total : job.size;
                 progress_.sent = status.sent;
+                progress_.stage = status.stage;
             }
             continue;
         }

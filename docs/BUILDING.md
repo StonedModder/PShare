@@ -15,6 +15,9 @@ binaries are produced with clang/lld and the repository's own tools under
 | wget, unzip, tar, sha256sum, git | pinned dependency downloads |
 | ccache (optional) | faster rebuilds (`USE_CCACHE=0` turns it off) |
 
+Host tests also require FFmpeg development libraries and `pkg-config`. The
+real-media integration tests use the `ffmpeg` and `ffprobe` commands.
+
 For the PC preview: Mesa's EGL/GL and libcurl development files, plus the
 `ffmpeg` command line (it makes the sample clip the preview plays) and the
 FFmpeg development libraries. For `make art`: Python 3 with Pillow.

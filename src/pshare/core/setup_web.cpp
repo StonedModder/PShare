@@ -717,6 +717,8 @@ std::string setup_page(const Config &config, std::string_view notice, bool notic
     body += "<form method=\"post\" action=\"/save\">";
 
     body += "<section class=\"card\"><h2>Uploading</h2>";
+    yes_no(&body, "g.convert_webm",
+           "Convert WebM to MP4 for all exports (up to 1080p/30; uses CPU)", config.convert_webm);
     yes_no(&body, "g.auto_upload", "Send new captures automatically", config.auto_upload);
     body += "<div class=\"row\"><div>";
     yes_no(&body, "g.upload_screenshots", "Screenshots", config.upload_screenshots);
@@ -824,6 +826,7 @@ int apply_setup_form(const std::map<std::string, std::string> &form, Config *con
     changed += set_bool(&config->upload_screenshots, form, "g.upload_screenshots");
     changed += set_bool(&config->upload_videos, form, "g.upload_videos");
     changed += set_bool(&config->upload_existing, form, "g.upload_existing");
+    changed += set_bool(&config->convert_webm, form, "g.convert_webm");
     changed += set_bool(&config->notify, form, "g.notify");
     changed += set_int(&config->retries, form, "g.retries", 1, 10, errors);
     {

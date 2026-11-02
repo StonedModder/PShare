@@ -40,6 +40,7 @@ struct DaemonStatus
     std::string destination; // where the upload in progress goes (state "uploading")
     std::uint64_t sent = 0;  // ... and how far it is
     std::uint64_t total = 0;
+    int stage = 0;  // UploadProgress stage, also reported by the background uploader
     int job = 0;    // the QUEUE number being sent (0: none, or automatic)
     std::string ip; // the console's address, as the daemon sees it
 

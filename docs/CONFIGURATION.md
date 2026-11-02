@@ -125,3 +125,51 @@ PPSA01234 = telegram
 
 A webhook URL or bot token is as good as a password: anyone who has it can
 post to your channel. Leave it out of bug reports and screenshots.
+
+### Large Telegram clips
+
+Videos sent to a Telegram bot are automatically split without re-encoding when
+they exceed 50,000,000 bytes (or `max_mb`, if that is smaller). Each message and
+filename includes its part number. Cuts follow video keyframes; part durations
+can differ. Every completed part is checked against the size limit before any
+part is sent. MP4 remains MP4; WebM remains WebM and is sent as a document unless
+the optional conversion below is enabled.
+
+Temporary files use `/data/pshare/tmp` and are removed after success, failure or
+cancellation; the original capture is untouched. Preparation temporarily needs
+roughly another copy of the clip on disk. An interrupted process can leave a
+temporary directory behind. A keyframe interval larger than the limit cannot
+be split losslessly and produces an error. Large Telegram videos use splitting
+before fallback routing. If a later part fails, earlier messages remain in the
+chat; retrying the capture sends the parts again.
+
+### Optional WebM conversion for all exports
+
+In **Settings > How**, enable **Convert WebM to MP4**, or use the global
+switch on the phone setup page. It applies to every export destination, including
+file hosts, USB/folders and SMB shares. The config key is:
+
+```ini
+[general]
+convert_webm = true
+```
+
+The default is `false`. When enabled, WebM is decoded and encoded as MP4 with
+H.264 video (yuv420p, ultrafast, CRF 23) and AAC stereo audio at 128 kb/s.
+Output fits within 1920×1080 and caps the frame rate at 30 fps without upscaling.
+Each video decoder and encoder uses at most two codec threads. This is lossy,
+uses CPU and can take time; its performance during gameplay has not yet been
+measured on PS5. Existing MP4 clips and screenshots are unaffected.
+
+Conversion runs before size-based splitting, for manual and automatic uploads.
+The original capture stays unchanged. Conversion progress and cancellation use
+the normal upload UI. Temporary converted files are deleted on normal return,
+error or cancellation; a process crash can leave them behind. Preparing and
+splitting a converted video can temporarily need space for both the MP4 and
+its parts. Conversion errors stop the upload rather than silently sending WebM.
+HDR (PQ/HLG) conversion is currently rejected because tone mapping is not
+implemented. The PS5-specific Opus header is corrected only in memory for
+decoding; the source file is not modified.
+
+Older per-Telegram `convert_webm` settings migrate to the global option when no
+explicit `[general]` value exists. An explicit global value takes precedence.

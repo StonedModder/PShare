@@ -124,6 +124,7 @@ struct Config
     bool upload_screenshots = true;
     bool upload_videos = true;
     bool upload_existing = false;
+    bool convert_webm = false; // convert WebM to H.264/AAC MP4 before any export
     bool notify = true;
     bool keep_logs = false;
     int poll_seconds = 5;

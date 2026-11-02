@@ -177,6 +177,7 @@ TEST(default_config_loads)
     CHECK_EQ(config.default_destination, "discord");
     CHECK_EQ(config.find("discord")->fallback, "catbox");
     CHECK_EQ(config.find("discord")->max_mb, 10);
+    CHECK(!config.convert_webm);
     // Discord has no webhook yet: the first configured one (catbox) is used.
     const Destination *chosen = config.destination_for("PPSA01234");
     CHECK(chosen != nullptr && chosen->id == "catbox");
@@ -192,6 +193,7 @@ TEST(config_store_round_trip)
     config.find("custom")->headers = {"Authorization: Bearer s", "X-Two: 2"};
     config.title_destinations["PPSA01234"] = "telegram";
     config.retries = 5;
+    config.convert_webm = true;
     store_config(config, &document);
     IniDocument again;
     again.parse(document.write());
@@ -201,7 +203,24 @@ TEST(config_store_round_trip)
     CHECK_EQ(loaded.find("custom")->headers.size(), 2u);
     CHECK_EQ(loaded.title_destinations["PPSA01234"], "telegram");
     CHECK_EQ(loaded.retries, 5);
+    CHECK(loaded.convert_webm);
     CHECK(document.write().find("Channel settings > Integrations") != std::string::npos);
+}
+
+TEST(conversion_setting_migrates_to_general)
+{
+    IniDocument document;
+    CHECK(document.parse("[destination.telegram]\ntype=telegram\nconvert_webm=true\n"));
+    Config config;
+    load_config(document, &config, nullptr);
+    CHECK(config.convert_webm);
+    store_config(config, &document);
+    CHECK(document.get_bool("general", "convert_webm", false));
+    CHECK(!document.get("destination.telegram", "convert_webm", nullptr));
+    document.set_bool("destination.telegram", "convert_webm", true);
+    document.set_bool("general", "convert_webm", false);
+    load_config(document, &config, nullptr);
+    CHECK(!config.convert_webm);
 }
 
 TEST(per_title_rules)
@@ -582,6 +601,7 @@ TEST(setup_form_changes_the_config)
     std::map<std::string, std::string> form = {
         {"g.auto_upload", "false"},
         {"g.retries", "7"},
+        {"g.convert_webm", "true"},
         {"g.default_destination", "catbox"},
         {"d.discord.url", " https://discord.com/api/webhooks/2/x "},
         {"d.discord.max_mb", "25"},
@@ -594,6 +614,7 @@ TEST(setup_form_changes_the_config)
     CHECK(changed >= 7);
     CHECK(!config.auto_upload);
     CHECK_EQ(config.retries, 7);
+    CHECK(config.convert_webm);
     CHECK_EQ(config.default_destination, "catbox");
     CHECK_EQ(config.find("discord")->url, "https://discord.com/api/webhooks/2/x");
     CHECK_EQ(config.find("discord")->max_mb, 25);
@@ -607,6 +628,7 @@ TEST(setup_form_changes_the_config)
     CHECK_EQ(errors.size(), 3u);
     const std::string page = setup_page(config, "Saved", false);
     CHECK(page.find("name=\"d.discord.url\"") != std::string::npos);
+    CHECK(page.find("g.convert_webm") != std::string::npos);
     // Saved secrets never go back to the browser; an empty field keeps them.
     CHECK(page.find("webhooks/2/x") == std::string::npos);
     CHECK(page.find("123:abc") == std::string::npos);
@@ -638,11 +660,13 @@ TEST(daemon_status_round_trip)
     CHECK_EQ(back.setup_port, 9078);
     status.job = 7;
     status.ip = "192.168.1.5";
-    const DaemonStatus again = DaemonStatus::parse(status.serialize() + "sent=10\ntotal=20\n");
+    const DaemonStatus again =
+        DaemonStatus::parse(status.serialize() + "sent=10\ntotal=20\nstage=5\n");
     CHECK_EQ(again.job, 7);
     CHECK_EQ(again.ip, "192.168.1.5");
     CHECK_EQ(again.sent, 10u);
     CHECK_EQ(again.total, 20u);
+    CHECK_EQ(again.stage, 5);
 }
 
 // ---- sending without the internet ---------------------------------------------

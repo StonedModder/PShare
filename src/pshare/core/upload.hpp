@@ -66,6 +66,7 @@ struct CaptionInfo
     std::string file;
     std::string size;
     std::string link;
+    std::string part; // optional Part n/N suffix for Telegram captions
 };
 CaptionInfo caption_info(const MediaItem &item, const std::string &game);
 std::string expand_caption(const std::string &pattern, const CaptionInfo &info);
@@ -94,7 +95,9 @@ struct UploadProgress
     std::atomic<std::uint64_t> sent{0};
     std::atomic<std::uint64_t> total{0};
     std::atomic<bool> cancel{false};
-    std::atomic<int> stage{0}; // 0 idle, 1 uploading, 2 fallback, 3 posting link, 4 retrying
+    // 0 idle, 1 uploading, 2 fallback, 3 posting link, 4 retrying, 5 splitting video, 6 converting
+    // WebM
+    std::atomic<int> stage{0};
 };
 
 struct UploadOutcome

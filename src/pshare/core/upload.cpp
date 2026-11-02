@@ -5,6 +5,10 @@
 #include "pshare/core/upload.hpp"
 
 #include "pshare/core/local_copy.hpp"
+#include "pshare/core/video_split.hpp"
+#include "pshare/core/video_convert.hpp"
+
+#include <algorithm>
 
 #include "pshare/core/text.hpp"
 
@@ -151,6 +155,8 @@ bool plan_request(const Destination &destination, const MediaItem &item, const C
             field = "video";
         }
         out.url = base + method;
+        if (!caption.part.empty())
+            message = clip(message, 990) + "\n" + caption.part;
         out.parts.push_back(text_part("caption", clip(message, 1024)));
         out.parts.push_back(file_part(field, item));
         break;
@@ -349,15 +355,91 @@ UploadOutcome upload_capture_with(const Config &config, const Destination &desti
                       "again";
         return blank;
     }
+    UploadOutcome outcome;
+    outcome.destination = destination.id;
+#if defined(PSHARE_CONSOLE) || defined(PSHARE_PAYLOAD)
+    const std::string scratch = Paths{}.data_root + "/tmp";
+#else
+    const std::string scratch = "/tmp/pshare";
+#endif
+    if (config.convert_webm && item.video() && ends_with_ci(item.file, ".webm"))
+    {
+        if (progress)
+        {
+            progress->stage = 6;
+            progress->sent = 0;
+            progress->total = 0;
+        }
+        VideoParts converted;
+        if (!convert_webm(item, scratch, progress, &converted, &outcome.error))
+        {
+            if (progress)
+                progress->stage = 0;
+            return outcome;
+        }
+        Config ready = config;
+        ready.convert_webm = false;
+        outcome = upload_capture_with(ready, destination, converted.items.front(), game, progress,
+                                      transport, user, pause_between_tries);
+        if (progress)
+            progress->stage = 0;
+        return outcome;
+    }
     // A drive or a PC share: a file copy, no HTTP at all.
     if (destination.type == DestinationType::folder)
         return copy_to_folder(destination, Paths{}, item, game, progress);
     if (destination.type == DestinationType::smb)
         return copy_to_share(destination, item, game, progress);
-    UploadOutcome outcome;
-    outcome.destination = destination.id;
     const CaptionInfo caption = caption_info(item, game);
     const std::uint64_t limit = destination.size_limit();
+    // Keep below the cloud Bot API ceiling even if a destination was configured
+    // with a larger max_mb. Small configured limits still apply.
+    const std::uint64_t telegram_limit =
+        limit ? std::min<std::uint64_t>(limit, 50000000) : 50000000;
+    if (destination.type == DestinationType::telegram && item.video() && item.size > telegram_limit)
+    {
+        struct ResetStage
+        {
+            UploadProgress *progress;
+            ~ResetStage()
+            {
+                if (progress)
+                    progress->stage = 0;
+            }
+        } reset{progress};
+        if (progress)
+        {
+            progress->stage = 5;
+            progress->sent = 0;
+            progress->total = 0;
+        }
+        VideoParts parts;
+        if (!split_video(item, telegram_limit, scratch, progress, &parts, &outcome.error))
+            return outcome;
+        // Prepare and validate every part before sending the first message.
+        for (std::size_t i = 0; i < parts.items.size(); ++i)
+        {
+            const std::string suffix =
+                "Part " + std::to_string(i + 1) + "/" + std::to_string(parts.items.size());
+            CaptionInfo part_caption = caption_info(parts.items[i], game);
+            part_caption.part = suffix;
+            if (progress)
+                progress->stage = 1;
+            const Attempt sent =
+                send_with_retries(config, destination, parts.items[i], part_caption, {}, progress,
+                                  transport, user, pause_between_tries);
+            outcome.attempts += sent.attempts;
+            if (!sent.ok)
+            {
+                outcome.error = suffix + ": " + sent.error;
+                if (i > 0)
+                    outcome.error += " (earlier parts were already sent)";
+                return outcome;
+            }
+        }
+        outcome.ok = true;
+        return outcome;
+    }
     std::string link;
 
     if (limit != 0 && item.size > limit)

@@ -210,6 +210,8 @@ DaemonStatus DaemonStatus::parse(std::string_view text)
             status.watch_errno = static_cast<int>(parse_int(value, 0));
         else if (key == "destination")
             status.destination = value;
+        else if (key == "stage")
+            status.stage = parse_int(value, 0);
         else if (key == "sent")
             status.sent = static_cast<std::uint64_t>(parse_int(value, 0));
         else if (key == "total")

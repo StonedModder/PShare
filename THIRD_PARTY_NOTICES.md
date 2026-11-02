@@ -135,7 +135,7 @@ No proprietary runtime module, encryption key, or game file is included.
 | [nothings/stb](https://github.com/nothings/stb) | `stb_image`, `stb_image_write` (thumbnails) | MIT / public domain |
 | [nayuki/QR-Code-generator](https://github.com/nayuki/QR-Code-generator) | `qrcodegen` (links and the phone page as QR codes) | MIT |
 | libcurl, OpenSSL, zlib, zstd, libpsl via [PacBrew](https://github.com/ps5-payload-dev/pacbrew-repo) | HTTPS uploads in the app and in pshared | curl, Apache-2.0, zlib, BSD, MIT |
-| [FFmpeg](https://ffmpeg.org/) 7.0 (libavformat, libavcodec, libswscale, libswresample, libavutil) via PacBrew, built `--enable-gpl --enable-libx264` with bzip2, xz, libiconv | Clip playback and clip thumbnails in the app | GPL-2.0-or-later as built (x264), linked into a GPL-3.0-or-later app |
+| [FFmpeg](https://ffmpeg.org/) 7.0 (libavformat, libavcodec, libswscale, libswresample, libavutil) via PacBrew, built `--enable-gpl --enable-libx264` with bzip2, xz, libiconv | Clip playback and clip thumbnails in the app; lossless Telegram video splitting and optional H.264/AAC conversion in the app and background uploader | GPL-2.0-or-later as built (x264), linked into a GPL-3.0-or-later app |
 | [ZiZc3/VLC](https://github.com/ZiZc3/VLC) (VLC for PS5) | The PS5-recording Opus header workaround (reimplemented in `src/app/video.cpp` after its FFmpeg patch) and the clip player's button layout; no code copied verbatim | GPL-3.0 |
 | [libsmb2](https://github.com/sahlberg/libsmb2) 6.1 via PacBrew | Copies to a PC share (app and pshared) | LGPL-2.1-or-later |
 | [blackbearreloaded/ProsperoStore](https://github.com/blackbearreloaded/ProsperoStore) | The Lapy client (`src/elevation`) and helper build script, taken from it | GPL-3.0-or-later |

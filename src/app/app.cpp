@@ -375,6 +375,10 @@ void App::draw_upload_bar(ui::Canvas &canvas) const
         line = "Posting the link to " + job.destination_name;
     else if (upload_.stage == 4)
         line = "Trying again";
+    else if (upload_.stage == 5)
+        line = "Preparing video parts for Telegram";
+    else if (upload_.stage == 6)
+        line = "Converting WebM to MP4";
     ui::text(list, fonts_.semibold, fonts_.semibold.font->fit(line, 22.0f, 380.0f), bar.x + 76.0f,
              bar.y + 32.0f, 22.0f, rgb(palette::cream));
     char amount[64];
