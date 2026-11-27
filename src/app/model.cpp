@@ -68,6 +68,7 @@ void Model::start()
         for (Thread &relay : relay_threads_)
             relay.start([this] { relay_loop(); }, 256u << 10);
     rescan();
+    delete_pending(); // sent while the app was closed
 }
 
 // Since a console restart, payloads (pshared, an FTP server) can read video
@@ -188,7 +189,36 @@ void Model::status_loop()
             {
                 status = daemon_status(0, true);
             }
-            post([status](Model &model) { model.daemon_ = status; });
+            // A Send all in pshared is over once its last job has an answer.
+            std::string answer;
+            const int last = batch_last_.load();
+            const bool over = last > 0 &&
+                              daemon_command("RESULT " + std::to_string(last), &answer, 800) &&
+                              trim(answer) != "pending";
+            if (over)
+                batch_last_ = 0;
+            const std::string note = trim(answer) == "unknown"
+                                         ? "The background uploader restarted on the way"
+                                         : std::string();
+            post(
+                [status, over, note](Model &model)
+                {
+                    model.daemon_ = status;
+                    if (status.delete_ask > 0 && !model.delete_request_busy_)
+                        model.fetch_delete_request();
+                    Batch &batch = model.batch_;
+                    if (!batch.active || batch.last_id == 0)
+                        return;
+                    if (status.job >= batch.first_id && status.job <= batch.last_id)
+                        batch.done = status.job - batch.first_id;
+                    if (over)
+                    {
+                        batch.daemon_done = true;
+                        batch.done = batch.last_id - batch.first_id + 1;
+                        if (!model.app_batch_pending())
+                            model.finish_batch(note);
+                    }
+                });
         }
         if (now_seconds() - last_scan >= kRescanSeconds)
         {
@@ -198,6 +228,7 @@ void Model::status_loop()
                 {
                     if (!model.scanning_)
                         model.rescan();
+                    model.delete_pending();
                 });
         }
         for (int i = 0; i < 10 && !quit_.load(); ++i)
@@ -267,6 +298,11 @@ void Model::upload_loop()
             History writer(environment_.paths.history());
             writer.append(entry);
         }
+        // Sent by the app itself: it deletes it too (pshared did, when it sent it).
+        // One that cannot be deleted stays in the gallery, where it shows as sent.
+        if (outcome.ok && job.delete_after && !by_daemon && !environment_.demo)
+            (void)delete_capture(job.path, environment_.paths.photo_root,
+                                 environment_.paths.video_root, nullptr);
         {
             Lock lock(mutex_);
             uploading_ = false;
@@ -279,6 +315,14 @@ void Model::upload_loop()
                 if (!model.environment_.elevated)
                     model.history_.append(entry); // nowhere to keep it but here
                 model.mark_uploads();
+                // A Send all says how it went once, at the end.
+                if (job.batch)
+                {
+                    if (model.batch_.active && !model.app_batch_pending() &&
+                        (model.batch_.last_id == 0 || model.batch_.daemon_done))
+                        model.finish_batch({});
+                    return;
+                }
                 ModelEvent event;
                 event.kind = EventKind::upload_finished;
                 event.ok = outcome.ok;
@@ -327,7 +371,10 @@ bool Model::send_through_daemon(const UploadJob &job, UploadOutcome *outcome)
     if (!ensure_daemon(&why))
         return false;
     std::string reply;
-    if (!daemon_command("QUEUE " + job.destination + "\t" + job.path, &reply, 2000) ||
+    // pshared deletes it after sending when asked, so that holds if the app closes.
+    if (!daemon_command("QUEUE " + job.destination + "\t" + job.path +
+                            (job.delete_after ? "\tdelete" : ""),
+                        &reply, 2000) ||
         !starts_with(reply, "ok "))
         return false;
     const int id = static_cast<int>(parse_int(trim(std::string_view(reply).substr(3)), 0));
@@ -528,6 +575,76 @@ void Model::delete_captures(std::vector<std::string> paths)
         });
 }
 
+void Model::delete_pending()
+{
+    if (environment_.demo || !environment_.elevated)
+        return;
+    const Paths where = environment_.paths;
+    io(
+        [this, where]
+        {
+            const int deleted = delete_pending_captures(where);
+            if (deleted == 0)
+                return;
+            post(
+                [deleted](Model &model)
+                {
+                    ModelEvent event;
+                    event.kind = EventKind::deleted;
+                    event.title = "Deleted " + std::to_string(deleted) +
+                                  (deleted == 1 ? " capture" : " captures");
+                    event.detail = "Sent with \"Delete once sent\"";
+                    model.events_.push_back(std::move(event));
+                    model.rescan();
+                });
+        });
+}
+
+void Model::fetch_delete_request()
+{
+    delete_request_busy_ = true;
+    io(
+        [this]
+        {
+            std::string reply;
+            std::vector<std::string> paths;
+            if (daemon_command("DELETEASK", &reply, 2000) && starts_with(reply, "ok"))
+                for (const std::string &line : split(reply, '\n'))
+                    if (starts_with(line, "/"))
+                        paths.emplace_back(trim(line));
+            post(
+                [paths](Model &model)
+                {
+                    // Only captures the app knows; the rest is not its to delete.
+                    model.delete_request_.clear();
+                    for (const std::string &path : paths)
+                        if (model.find_capture(path) != nullptr)
+                            model.delete_request_.push_back(path);
+                    if (model.delete_request_.empty())
+                    {
+                        model.answer_delete_request(false);
+                        return;
+                    }
+                    ModelEvent event;
+                    event.kind = EventKind::delete_asked;
+                    model.events_.push_back(std::move(event));
+                });
+        });
+}
+
+void Model::answer_delete_request(bool allow)
+{
+    if (allow)
+        delete_captures(delete_request_);
+    delete_request_.clear();
+    io(
+        [this]
+        {
+            daemon_command("DELETEASK clear", nullptr);
+            post([](Model &model) { model.delete_request_busy_ = false; });
+        });
+}
+
 void Model::mark_uploads()
 {
     std::map<std::string, const HistoryEntry *> last;
@@ -687,16 +804,25 @@ bool Model::upload(const std::string &path, const std::string &destination_id, s
                                           : destination->display_name() + " is not set up yet";
         return false;
     }
+    return queue_job(*capture, *destination, false, false, why);
+}
+
+bool Model::queue_job(const Capture &capture, const Destination &destination, bool delete_after,
+                      bool batch, std::string *why)
+{
+    const std::string &path = capture.item.path;
     UploadJob job;
     job.id = next_job_++;
     job.path = path;
-    job.file = capture->item.file;
-    job.game = capture->game;
-    job.destination = destination->id;
-    job.destination_name = destination->display_name();
-    job.video = capture->item.video();
-    job.size = capture->item.size;
+    job.file = capture.item.file;
+    job.game = capture.game;
+    job.destination = destination.id;
+    job.destination_name = destination.display_name();
+    job.video = capture.item.video();
+    job.size = capture.item.size;
     job.background = !environment_.demo && app_flag(kBackgroundSendsFlag, true);
+    job.delete_after = delete_after;
+    job.batch = batch;
     Lock lock(mutex_);
     if ((uploading_ && current_.path == path) ||
         std::any_of(upload_jobs_.begin(), upload_jobs_.end(),
@@ -712,8 +838,165 @@ bool Model::upload(const std::string &path, const std::string &destination_id, s
     return true;
 }
 
+int Model::send_batch(const std::vector<std::string> &paths, const std::string &destination_id,
+                      bool delete_after, std::string *why)
+{
+    const auto fail = [&](std::string reason)
+    {
+        if (why)
+            *why = std::move(reason);
+        return 0;
+    };
+    if (batch_.active)
+        return fail("A Send all is already going; cancel it first");
+    const Destination *chosen = destination_id.empty() ? nullptr : config_.find(destination_id);
+    if (!destination_id.empty() && (chosen == nullptr || !chosen->configured()))
+        return fail(chosen == nullptr ? "That destination is gone"
+                                      : chosen->display_name() + " is not set up yet");
+    // What can go: there, not read back as zeros, and with somewhere to go.
+    std::vector<std::string> take;
+    for (const std::string &path : paths)
+    {
+        const Capture *capture = find_capture(path);
+        if (capture == nullptr || capture->blank)
+            continue;
+        const Destination *to =
+            chosen != nullptr ? chosen : config_.destination_for(capture->item.title_id);
+        if (to != nullptr && to->configured())
+            take.push_back(path);
+    }
+    if (take.empty())
+        return fail(paths.empty() ? "Nothing to send" : "None of these can be sent right now");
+
+    batch_ = Batch{};
+    batch_.active = true;
+    batch_.paths = take;
+    batch_.destination = destination_id;
+    batch_.destination_name =
+        chosen != nullptr ? chosen->display_name() : std::string("each game's destination");
+    batch_.delete_after = delete_after;
+    batch_.started = now_seconds();
+    if (environment_.demo || !app_flag(kBackgroundSendsFlag, true))
+    {
+        batch_by_app(take);
+        return static_cast<int>(take.size());
+    }
+    const std::string flags = delete_after ? "batch,delete" : "batch";
+    io(
+        [this, take, destination_id, flags]
+        {
+            std::string reason;
+            int first = 0;
+            int last = 0;
+            std::vector<std::string> refused;
+            if (ensure_daemon(&reason))
+            {
+                for (const std::string &path : take)
+                {
+                    std::string reply;
+                    const int id =
+                        daemon_command("QUEUE " + destination_id + "\t" + path + "\t" + flags,
+                                       &reply, 2000) &&
+                                starts_with(reply, "ok ")
+                            ? static_cast<int>(
+                                  parse_int(trim(std::string_view(reply).substr(3)), 0))
+                            : 0;
+                    if (id <= 0)
+                    {
+                        refused.push_back(path);
+                        continue;
+                    }
+                    first = first == 0 ? id : first;
+                    last = id;
+                }
+            }
+            else
+            {
+                refused = take;
+            }
+            post(
+                [first, last, refused](Model &model)
+                {
+                    model.batch_.first_id = first;
+                    model.batch_.last_id = last;
+                    // Watched only from here, so its end cannot come before its numbers.
+                    model.batch_last_ = last;
+                    // What pshared would not take (a clip it reads as zeros, or
+                    // no pshared at all), the app sends itself.
+                    if (!refused.empty())
+                        model.batch_by_app(refused);
+                });
+        });
+    return static_cast<int>(take.size());
+}
+
+void Model::batch_by_app(const std::vector<std::string> &paths)
+{
+    batch_.by_app = true;
+    for (const std::string &path : paths)
+    {
+        const Capture *capture = find_capture(path);
+        const Destination *to = capture == nullptr ? nullptr
+                                : batch_.destination.empty()
+                                    ? config_.destination_for(capture->item.title_id)
+                                    : config_.find(batch_.destination);
+        if (capture != nullptr && to != nullptr)
+            queue_job(*capture, *to, batch_.delete_after, true, nullptr);
+    }
+    if (!app_batch_pending() && (batch_.last_id == 0 || batch_.daemon_done))
+        post([](Model &model) { model.finish_batch({}); });
+}
+
+bool Model::app_batch_pending() const
+{
+    Lock lock(mutex_);
+    return std::any_of(upload_jobs_.begin(), upload_jobs_.end(),
+                       [](const UploadJob &job) { return job.batch; }) ||
+           (uploading_ && current_.batch);
+}
+
+void Model::finish_batch(const std::string &note)
+{
+    if (!batch_.active)
+        return;
+    history_.refresh();
+    mark_uploads();
+    // Sent: a successful history line since the batch started.
+    int sent = 0;
+    for (const std::string &path : batch_.paths)
+        for (const HistoryEntry &entry : history_.entries())
+            if (entry.ok && entry.path == path && entry.time >= batch_.started)
+            {
+                ++sent;
+                break;
+            }
+    const int total = static_cast<int>(batch_.paths.size());
+    ModelEvent event;
+    event.kind = EventKind::batch_finished;
+    event.ok = sent == total;
+    event.title = "Sent " + std::to_string(sent) + " of " + std::to_string(total) +
+                  (total == 1 ? " capture" : " captures");
+    event.detail = !note.empty()                     ? note
+                   : sent < total                    ? "The ones that failed are in History"
+                   : batch_.delete_after && sent > 0 ? "each deleted from the console once sent"
+                                                     : "to " + batch_.destination_name;
+    events_.push_back(std::move(event));
+    const bool deleted = batch_.delete_after;
+    batch_ = Batch{};
+    batch_last_ = 0;
+    if (deleted)
+    {
+        rescan();
+        delete_pending(); // what pshared sent but could not delete
+    }
+}
+
 void Model::cancel_upload()
 {
+    // A Send all handed to pshared: drop its queue there too; RESULT on the
+    // last job then answers, and the batch finishes as usual.
+    if (batch_.active && batch_.last_id > 0)
+        io([] { daemon_command("CANCEL", nullptr); });
     Lock lock(mutex_);
     upload_jobs_.clear();
     upload_configs_.clear();
@@ -730,6 +1013,25 @@ UploadView Model::upload_view() const
     view.total = progress_.total.load();
     view.stage = progress_.stage.load();
     view.queued = static_cast<int>(upload_jobs_.size());
+    if (batch_.active)
+    {
+        view.batch = true;
+        view.batch_total = static_cast<int>(batch_.paths.size());
+        view.batch_destination = batch_.destination_name;
+        int left = 0;
+        for (const UploadJob &job : upload_jobs_)
+            left += job.batch ? 1 : 0;
+        // In pshared: how far its QUEUE numbers have got; in the app: what is left.
+        view.batch_done = batch_.by_app && batch_.last_id == 0
+                              ? view.batch_total - left - (uploading_ && current_.batch ? 1 : 0)
+                              : batch_.done;
+        if (!uploading_ && batch_.last_id > 0 && daemon_.job >= batch_.first_id &&
+            daemon_.job <= batch_.last_id)
+        {
+            view.sent = daemon_.sent;
+            view.total = daemon_.total;
+        }
+    }
     return view;
 }
 

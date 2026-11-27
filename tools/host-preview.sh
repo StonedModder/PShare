@@ -35,6 +35,8 @@ for source in "${sources[@]}"; do
     if [[ $source == *.c ]]; then
         ninja_inputs=("$source" "$cc")
         ninja_edge CC "$object" "${compiler_cache[@]}" "$cc" -std=c11 -O2 -w -I"$root/src" \
+            -I"$root/third_party/jxrlib" -I"$root/third_party/jxrlib/common/include" \
+            -I"$root/third_party/jxrlib/image/sys" -I"$root/third_party/jxrlib/jxrgluelib" \
             -MD -MF "$object.d" -c "$source" -o "$object"
     else
         ninja_inputs=("$source" "$cxx")

@@ -59,10 +59,11 @@ data asked for.
 | `PAUSE` / `RESUME` | stop or restart automatic uploads |
 | `RELOAD` | read `config.ini` again |
 | `RESCAN` | look at the capture folders now |
-| `QUEUE [<destination>\t]<path>` | `ok <id>`: send this file now |
+| `QUEUE [<destination>\t]<path>[\t<flags>]` | `ok <id>`: send this file now. Flags, comma separated: `delete` deletes the capture once it is sent; `batch` marks one of a Send all (no notification each, one summary when the queue empties) |
 | `RESULT <id>` | `pending`, `ok <destination>\t<link>`, `failed <destination>\t<error>` or `unknown` |
 | `CANCEL` | stop the current upload and drop the queue |
 | `SETUP on` / `SETUP off` | open the web page for 30 minutes, or close it |
+| `DELETEASK` / `DELETEASK clear` | the captures a browser asked to delete (`ok`, then one path per line), or forget them once the app has asked. `STATUS` says `delete_ask=<n>` while there are some; the app asks on the console and deletes only if the player says yes |
 | `QUIT` | exit |
 | `RELAY` | the app's end of the clip relay (below): `none`, or `<first>\t<last>\t<path>` and then the app sends those bytes |
 
@@ -73,6 +74,22 @@ With `[app] background_sends = true` (the default) the thread hands it to
 pshared: start it if needed, `QUEUE`, then poll `RESULT` and `STATUS` for
 progress, which the top bar shows. pshared writes the history line, so a long
 clip keeps uploading after the app closes.
+
+**Send all** (`Model::send_batch`) hands a whole batch to pshared at once,
+one `QUEUE` per capture with the `batch` flag (and `delete` when asked), so
+it finishes after the app closes. pshared takes its queue one job at a time,
+so `CANCEL` stops the rest of the batch. The app follows it through
+`STATUS` (`job=`) and asks `RESULT` about the last job to know when it is
+over, then counts what was sent from the history. A capture is deleted only
+after it was sent successfully. pshared, a payload, may not be allowed to
+delete captures; then it lists them in `/data/pshare/delete-after-send.txt`
+and the app, which can, deletes them when it starts, on its regular rescan
+and when the batch ends. Rate limits (HTTP 429) are waited out for as
+long as the service asks (`retry_after` from Telegram and Discord). Captures
+of a batch going to the same Telegram chat are sent as albums of up to 10
+(`sendMediaGroup`; photos and files apart, 50 MB at most, `album_kind`): pshared waits until the app's `QUEUE` lines stop for half
+a second, then takes up to ten that fit, and every job of the album answers
+`pending` to `RESULT` until it is sent.
 
 When pshared cannot run (no loader on 9021, the ELF missing) the app sends
 the file itself with libcurl and writes the history line.
@@ -99,6 +116,7 @@ saved value).
 | `/v/<file name>`, `/view?p=<capture>` | one capture full screen with the app's controls (keyboard, touch, or a controller through the Gamepad API) |
 | `POST /send`, `/result?id=` | send from the browser, like `QUEUE` / `RESULT` |
 | `/file?p=<capture>` | the file itself, with `Range` support so clips stream; only paths under the capture folders |
+| `POST /act` | the gallery's selection: `act=send` / `delete` with the ticked `s.<n>` paths, or `act=send-all` with the `game` filter; `d` the destination, `skip` to leave out what was sent. Sends go through the batch queue; a delete only becomes a question on the console (`DELETEASK`), and is refused while the app is closed |
 | `POST /save` | writes the settings form back to `config.ini` |
 
 ## The clip relay
@@ -140,7 +158,8 @@ src/main.cpp         console entry point
 src/app/             the app: model (workers, pshared hand-off), pages, clip player,
                      video decoder, thumbnails, look
 src/pshare/core/     shared by the app, pshared and the tests: config and INI, captures,
-                     uploads (curl, SMB, folder), history, watcher, net, web pages
+                     uploads (curl, OneDrive, SMB, folder), pictures (stb_image: thumbnails,
+                     Telegram photo copies), history, watcher, net, web pages
 src/elevation/       Lapy client
 src/runtime/         heap, libc additions the console's runtime lacks
 src/ui, src/gfx, src/audio, src/platform, src/core

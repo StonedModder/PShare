@@ -71,6 +71,11 @@ class Watcher
     {
         return last_errno_;
     }
+    // Folders the last scan could not open, and the first of them (scan_media).
+    const ScanResult &last_scan_problems() const
+    {
+        return problems_;
+    }
 
     // For tests: the seen-list text and its parse.
     std::string serialize() const;
@@ -93,7 +98,11 @@ class Watcher
     std::set<std::string> seen_; // ordered: see history.hpp
     std::map<std::string, Pending> pending_;
     bool dirty_ = false;
+    // What is there at the first look is the back catalogue; after that,
+    // anything not seen is new, whatever date its file carries.
+    bool baselined_ = false;
     int last_errno_ = 0;
+    ScanResult problems_; // only the unreadable_* fields are kept
 };
 
 } // namespace pshare

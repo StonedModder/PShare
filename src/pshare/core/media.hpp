@@ -69,6 +69,13 @@ struct MediaItem
         return video() ? "Clip" : "Screenshot";
     }
     const char *content_type() const;
+    // A JPEG or PNG: what browsers, chats and the app's decoder can show. The
+    // PS5 saves HDR screenshots as JPEG XR (.jxr), which none of them do;
+    // those are kept and sent as files.
+    bool web_image() const;
+    // A JPEG XR (.jxr) HDR screenshot: PShare decodes it (picture.hpp) and
+    // sends a JPEG copy where a chat or host has to show it.
+    bool jxr() const;
 };
 
 struct ScanOptions
@@ -86,6 +93,11 @@ struct ScanResult
     bool video_root = false;
     int folders = 0;
     int open_errno = 0; // the first error opening a root (EPERM: not elevated)
+    // Folders below the roots that could not be opened: their captures are
+    // missing from the scan. The first one and why, for the log.
+    int unreadable = 0;
+    std::string unreadable_path;
+    int unreadable_errno = 0;
 };
 
 ScanResult scan_media(const Paths &paths, const ScanOptions &options);
@@ -103,6 +115,14 @@ bool capture_reads_blank(const std::string &path);
 // or `video_root` are accepted.
 bool delete_capture(const std::string &path, const std::string &photo_root,
                     const std::string &video_root, std::string *error);
+
+// "Delete once sent" when the deleting has to wait: pshared, a payload, may not
+// be allowed to delete captures, so it lists them in Paths::pending_deletes()
+// and the app deletes them. Adding appends a line; deleting takes the list
+// over (renamed first, so pshared can keep adding), deletes each capture and
+// puts back the ones that could not go. Returns how many were deleted.
+bool add_pending_delete(const Paths &paths, const std::string &capture);
+int delete_pending_captures(const Paths &paths);
 
 // The name's extension says screenshot or video; false for anything else.
 bool capture_kind(std::string_view file, MediaKind *kind);

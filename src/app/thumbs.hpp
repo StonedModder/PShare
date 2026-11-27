@@ -22,30 +22,14 @@
 #include <cstdint>
 #include <deque>
 #include <list>
+#include "pshare/core/picture.hpp"
+
 #include <string>
 #include <map>
 #include <vector>
 
 namespace pshare::app
 {
-
-struct Picture
-{
-    int width = 0;
-    int height = 0;
-    std::vector<std::uint8_t> rgba;
-};
-
-// Decodes a JPEG or PNG and shrinks it to fit max_width x max_height
-// (keeping its shape). False when the file cannot be read or decoded.
-bool decode_picture(const std::string &path, int max_width, int max_height, Picture *picture);
-// The same from bytes in memory.
-bool decode_picture_bytes(const std::string &bytes, int max_width, int max_height,
-                          Picture *picture);
-// Box-filter shrink (also used by the tests).
-Picture shrink(const Picture &source, int max_width, int max_height);
-// A JPEG of `picture` (quality 0..100); empty on failure.
-std::string encode_jpeg(const Picture &picture, int quality);
 
 class Thumbs
 {

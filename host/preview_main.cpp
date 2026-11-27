@@ -90,8 +90,8 @@ bool load_font(hui::gfx::Renderer &renderer, const std::string &path, hui::gfx::
 
 std::uint32_t load_art(hui::gfx::Renderer &renderer, const std::string &path, float *aspect)
 {
-    app::Picture picture;
-    if (!app::decode_picture(path, 2048, 2048, &picture))
+    Picture picture;
+    if (!decode_picture(path, 2048, 2048, &picture))
         return 0;
     if (aspect != nullptr)
         *aspect = static_cast<float>(picture.width) / picture.height;
@@ -118,7 +118,7 @@ Rgb hex(std::uint32_t value)
 
 // A cartoon "game screenshot": a sky, a sun, layered hills, a few shapes.
 // Nothing realistic, nothing anyone owns.
-app::Picture cartoon(int seed, int width, int height)
+Picture cartoon(int seed, int width, int height)
 {
     const Rgb skies[][2] = {{hex(0x2b1b6b), hex(0xff8a7a)}, {hex(0x0f3b5f), hex(0x6fe3d6)},
                             {hex(0x40135a), hex(0xffc35e)}, {hex(0x14284f), hex(0xa58bff)},
@@ -130,7 +130,7 @@ app::Picture cartoon(int seed, int width, int height)
                             {hex(0x14432f), hex(0x1f6e47), hex(0x2e9c5f)},
                             {hex(0x6b2a14), hex(0xa8461f), hex(0xe07b3a)}};
     const int k = seed % 6;
-    app::Picture picture;
+    Picture picture;
     picture.width = width;
     picture.height = height;
     picture.rgba.resize(static_cast<std::size_t>(width) * height * 4);
@@ -180,10 +180,10 @@ app::Picture cartoon(int seed, int width, int height)
 }
 
 // A game icon: a disc of colour with a simple glyph.
-app::Picture game_icon(std::uint32_t a, std::uint32_t b, int glyph)
+Picture game_icon(std::uint32_t a, std::uint32_t b, int glyph)
 {
     const int size = 256;
-    app::Picture picture;
+    Picture picture;
     picture.width = picture.height = size;
     picture.rgba.resize(static_cast<std::size_t>(size) * size * 4);
     for (int y = 0; y < size; ++y)
@@ -284,7 +284,7 @@ Paths build_console(const std::string &root)
                     R"({"localizedParameters":{"defaultLanguage":"en-US","en-US":{"titleName":")") +
                     game.name + "\"}}}");
         }
-        write(dir + "/icon0.png", app::encode_jpeg(game_icon(game.a, game.b, game.glyph), 90));
+        write(dir + "/icon0.png", encode_jpeg(game_icon(game.a, game.b, game.glyph), 90));
     }
 
     const std::int64_t now = static_cast<std::int64_t>(std::time(nullptr));
@@ -301,7 +301,7 @@ Paths build_console(const std::string &root)
         pshare::ensure_directory(dir);
         const std::string path =
             dir + "/" + stamp(when) + "_0000000" + std::to_string(i % 10) + ".jpg";
-        write(path, app::encode_jpeg(cartoon(i, 1280, 720), 88));
+        write(path, encode_jpeg(cartoon(i, 1280, 720), 88));
         set_mtime(path, when);
         shots.push_back(path);
     }

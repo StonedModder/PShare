@@ -1,0 +1,4 @@
+/* PShare - builds jxrlib image/decode/segdec.c unchanged (see jxr_port.h).
+ * SPDX-License-Identifier: BSD-2-Clause */
+#include "jxr_port.h"
+#include "image/decode/segdec.c"

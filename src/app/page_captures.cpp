@@ -8,6 +8,7 @@
 #include "pshare/core/text.hpp"
 
 #include <algorithm>
+#include <set>
 
 namespace pshare::app
 {
@@ -21,6 +22,36 @@ enum ActionTag
     action_link = 4,
     action_play = 5,
     action_browser = 6,
+};
+
+// The Options menu's items on this page (Page::kPageMenuTag up).
+enum MenuTag
+{
+    menu_select = Page::kPageMenuTag,
+    menu_send_all,
+    menu_delete_all,
+    menu_send_selected,
+    menu_delete_selected,
+    menu_select_all,
+    menu_select_none,
+    menu_stop_selecting,
+};
+
+// The "Send ..." sheet's rows.
+enum BulkRow
+{
+    bulk_to = 1,
+    bulk_skip_sent,
+    bulk_delete,
+    bulk_go,
+};
+
+// What the confirmation dialog is asking about.
+enum class Confirm : std::uint8_t
+{
+    none,
+    delete_now,       // delete these captures
+    send_then_delete, // start a Send all that deletes each one once sent
 };
 
 enum class Zone : std::uint8_t
@@ -104,6 +135,15 @@ class CapturesPage final : public Page
         picker_list_.style.value_size = 20.0f;
         picker_list_.style.highlight.kind = ui::HighlightKind::fill;
         unreadable_.style.theme = theme();
+        confirm_.style.theme = theme();
+
+        bulk_.style.theme = theme();
+        bulk_.style.size = 660.0f;
+        bulk_.style.footer = 96.0f;
+        bulk_.content = [this](ui::Canvas &canvas, const gfx::Rect &, float)
+        { bulk_form_.draw(canvas); };
+        bulk_form_.style.theme = theme();
+        bulk_form_.style.row_height = 68.0f;
     }
 
     const char *title() const override
@@ -138,12 +178,13 @@ class CapturesPage final : public Page
     bool modal() const override
     {
         return sheet_.is_open() || destinations_.is_open() || viewer_open_ || clip_.is_open() ||
-               picker_.is_open() || unreadable_.is_open();
+               picker_.is_open() || unreadable_.is_open() || bulk_.is_open() || confirm_.is_open();
     }
     bool wants_glass() const override
     {
         return sheet_.visible() || destinations_.visible() || viewer_fade_.value > 0.01f ||
-               clip_.visible() || picker_.visible() || unreadable_.visible();
+               clip_.visible() || picker_.visible() || unreadable_.visible() || bulk_.visible() ||
+               confirm_.visible();
     }
 
     int hints(ui::Hint *out, int capacity) const override
@@ -154,10 +195,16 @@ class CapturesPage final : public Page
             if (n < capacity)
                 out[n++] = {button, label};
         };
-        if (unreadable_.is_open())
+        if (unreadable_.is_open() || confirm_.is_open())
         {
             add(ui::Button::cross, "Select");
-            add(ui::Button::circle, "Keep");
+            add(ui::Button::circle, unreadable_.is_open() ? "Keep" : "Cancel");
+            return n;
+        }
+        if (bulk_.is_open())
+        {
+            add(ui::Button::cross, "Choose");
+            add(ui::Button::circle, "Close");
             return n;
         }
         if (clip_.is_open() && !destinations_.is_open())
@@ -185,6 +232,16 @@ class CapturesPage final : public Page
             add(ui::Button::cross, zone_ == Zone::game ? "Pick a game" : "Flip the order");
             add(ui::Button::circle, "Back");
         }
+        else if (!view_.empty() && selecting_)
+        {
+            select_hint_ = "Select (" + std::to_string(chosen_.size()) + ")";
+            add(ui::Button::cross, select_hint_.c_str());
+            add(ui::Button::square, "Send selected");
+            add(ui::Button::triangle,
+                chosen_.size() == paths_.size() ? "Select none" : "Select all");
+            add(ui::Button::circle, "Done");
+            add(ui::Button::options, "Delete...");
+        }
         else if (!view_.empty())
         {
             add(ui::Button::cross, "Details");
@@ -205,8 +262,110 @@ class CapturesPage final : public Page
             unreadable_pending_ = true; // asked when the page is in use (update)
     }
 
+    void menu_items(std::vector<ui::MenuItem> &items, Context &context) const override
+    {
+        (void)context;
+        if (view_.empty())
+            return;
+        const auto add =
+            [&](int tag, std::string label, std::string shortcut = {}, bool disabled = false)
+        {
+            ui::MenuItem item;
+            item.tag = tag;
+            item.label = std::move(label);
+            item.shortcut = std::move(shortcut);
+            item.disabled = disabled;
+            items.push_back(std::move(item));
+        };
+        const std::string shown = std::to_string(paths_.size());
+        if (!selecting_)
+        {
+            add(menu_select, "Select captures");
+            add(menu_send_all, "Send all shown...", shown);
+            add(menu_delete_all, "Delete all shown...", shown);
+            return;
+        }
+        const std::string count = std::to_string(chosen_.size());
+        add(menu_send_selected, "Send selected...", count, chosen_.empty());
+        add(menu_delete_selected, "Delete selected...", count, chosen_.empty());
+        if (chosen_.size() == paths_.size())
+            add(menu_select_none, "Select none");
+        else
+            add(menu_select_all, "Select all shown", shown);
+        add(menu_stop_selecting, "Stop selecting");
+    }
+
+    void menu_action(int tag, ui::Feedback &feedback, Context &context) override
+    {
+        switch (tag)
+        {
+        case menu_select:
+            selecting_ = true;
+            chosen_.clear();
+            set_zone(Zone::grid);
+            feedback.play(hui::audio::Cue::toggle);
+            break;
+        case menu_send_all:
+            open_bulk(context, paths_, feedback);
+            break;
+        case menu_delete_all:
+            ask_delete(context, paths_, feedback);
+            break;
+        case menu_send_selected:
+            open_bulk(context, selection(), feedback);
+            break;
+        case menu_delete_selected:
+            ask_delete(context, selection(), feedback);
+            break;
+        case menu_select_all:
+            chosen_.insert(paths_.begin(), paths_.end());
+            break;
+        case menu_select_none:
+            chosen_.clear();
+            break;
+        case menu_stop_selecting:
+            stop_selecting();
+            break;
+        default:
+            break;
+        }
+    }
+
     bool handle(const InputFrame &input, ui::Feedback &feedback, Context &context) override
     {
+        if (confirm_.is_open())
+        {
+            if (confirm_.handle(input, feedback) == ui::Event::activated && confirm_.choice() == 1)
+            {
+                if (confirming_ == Confirm::delete_now)
+                {
+                    context.model.delete_captures(confirm_paths_);
+                    stop_selecting();
+                }
+                else if (confirming_ == Confirm::send_then_delete)
+                {
+                    start_bulk(context, feedback);
+                }
+            }
+            if (!confirm_.is_open())
+            {
+                confirming_ = Confirm::none;
+                confirm_paths_.clear();
+            }
+            return false;
+        }
+        if (bulk_.is_open())
+        {
+            if (bulk_.handle(input, feedback) == ui::Event::none)
+            {
+                const ui::Event event = bulk_form_.handle(input, feedback);
+                if (event == ui::Event::changed)
+                    fill_bulk(context);
+                else if (event == ui::Event::activated && bulk_form_.changed_id() == bulk_go)
+                    confirm_bulk(context, feedback);
+            }
+            return false;
+        }
         if (unreadable_.is_open())
         {
             if (unreadable_.handle(input, feedback) == ui::Event::activated &&
@@ -382,6 +541,32 @@ class CapturesPage final : public Page
                 set_zone(Zone::tabs);
             return input.nav == Direction::left || input.is_pressed(Action::back);
         }
+        if (selecting_)
+        {
+            if (input.is_pressed(Action::back))
+            {
+                stop_selecting();
+                feedback.play(hui::audio::Cue::back);
+                return false;
+            }
+            if (input.is_pressed(Action::west))
+            {
+                if (chosen_.empty())
+                    ui::refuse(feedback, grid_.style, InputFrame{}, refusal_);
+                else
+                    open_bulk(context, selection(), feedback);
+                return false;
+            }
+            if (input.is_pressed(Action::north))
+            {
+                if (chosen_.size() == paths_.size())
+                    chosen_.clear();
+                else
+                    chosen_.insert(paths_.begin(), paths_.end());
+                feedback.play(hui::audio::Cue::toggle);
+                return false;
+            }
+        }
         if (input.is_pressed(Action::back))
             return true;
         if (input.is_pressed(Action::west))
@@ -395,7 +580,14 @@ class CapturesPage final : public Page
             return false;
         }
         const ui::Event event = grid_.handle(input, feedback);
-        if (event == ui::Event::activated)
+        if (event == ui::Event::activated && selecting_)
+        {
+            const std::string &path = paths_[static_cast<std::size_t>(grid_.focus())];
+            if (!chosen_.erase(path))
+                chosen_.insert(path);
+            feedback.play(hui::audio::Cue::toggle);
+        }
+        else if (event == ui::Event::activated)
             open_sheet(context, feedback);
         else if (event == ui::Event::none && grid_.exit() == Direction::up)
             set_zone(Zone::tabs);
@@ -415,6 +607,9 @@ class CapturesPage final : public Page
         grid_.update(dt);
         sheet_.update(dt);
         unreadable_.update(dt);
+        confirm_.update(dt);
+        bulk_.update(dt);
+        bulk_form_.update(dt);
         if (unreadable_pending_ && focused_ && !modal())
         {
             unreadable_pending_ = false;
@@ -465,19 +660,37 @@ class CapturesPage final : public Page
         gfx::DrawList &list = scene.list;
         tabs_.draw(scene);
         draw_buttons(scene, context);
-        // What is shown, on the right of the tabs.
-        std::string summary;
+        // What is shown, right of the buttons: the longest wording that fits the
+        // room they leave (wide tab counts and a long game name leave little),
+        // else nothing; while selecting, the hint bar has the count too.
+        std::vector<std::string> wordings;
+        const std::string shown = std::to_string(view_.size());
         if (context.model.scanning() && !context.model.scanned_once())
-            summary = "Looking for captures...";
+        {
+            wordings = {"Looking for captures...", "Looking..."};
+        }
+        else if (selecting_)
+        {
+            const std::string chosen = std::to_string(chosen_.size());
+            wordings = {chosen + " of " + shown + " selected", chosen + " selected", chosen};
+        }
         else
-            summary = std::to_string(view_.size()) + (view_.size() == 1 ? " capture" : " captures");
-        int sent = 0;
-        for (int index : view_)
-            sent += context.model.captures()[static_cast<std::size_t>(index)].uploaded ? 1 : 0;
-        if (!view_.empty())
-            summary += " · " + std::to_string(sent) + " sent";
-        ui::text(list, context.fonts.semibold, summary, area_.x + area_.w, area_.y + 38.0f, 22.0f,
-                 rgb(palette::mist), gfx::Align::right);
+        {
+            int sent = 0;
+            for (int index : view_)
+                sent += context.model.captures()[static_cast<std::size_t>(index)].uploaded ? 1 : 0;
+            const std::string captures = shown + (view_.size() == 1 ? " capture" : " captures");
+            wordings = {captures + " \xC2\xB7 " + std::to_string(sent) + " sent", captures, shown};
+        }
+        const gfx::Rect order = button_rect(context, 1);
+        const float room = area_.x + area_.w - (order.x + order.w + 24.0f);
+        for (const std::string &wording : wordings)
+            if (context.fonts.semibold.measure(wording, 22.0f) <= room)
+            {
+                ui::text(list, context.fonts.semibold, wording, area_.x + area_.w, area_.y + 38.0f,
+                         22.0f, rgb(palette::mist), gfx::Align::right);
+                break;
+            }
 
         if (view_.empty())
         {
@@ -526,6 +739,8 @@ class CapturesPage final : public Page
         clip_.draw(overlay);
         destinations_.draw(overlay);
         unreadable_.draw(overlay);
+        bulk_.draw(overlay);
+        confirm_.draw(overlay);
         if (viewer_fade_.value > 0.01f)
         {
             gfx::DrawList &list = overlay.list;
@@ -576,6 +791,192 @@ class CapturesPage final : public Page
         content.default_button = 0;
         unreadable_paths_ = std::move(paths);
         unreadable_.open(std::move(content), feedback);
+    }
+
+    // ---- Send all, selecting, deleting ----
+
+    // The selected captures, in the order shown.
+    std::vector<std::string> selection() const
+    {
+        std::vector<std::string> out;
+        for (const std::string &path : paths_)
+            if (chosen_.count(path) != 0)
+                out.push_back(path);
+        return out;
+    }
+
+    void stop_selecting()
+    {
+        selecting_ = false;
+        chosen_.clear();
+    }
+
+    // The "Send ..." sheet for `paths`: where to, skip the ones already sent,
+    // and delete each from the console once it is sent.
+    void open_bulk(Context &context, std::vector<std::string> paths, ui::Feedback &feedback)
+    {
+        if (paths.empty())
+        {
+            ui::refuse(feedback, grid_.style, InputFrame{}, refusal_);
+            return;
+        }
+        bulk_paths_ = std::move(paths);
+        bulk_skip_sent_ = true;
+        bulk_delete_ = false;
+        bulk_to_ = 0;
+        // The title first: the sheet leaves room for it when it opens, and the
+        // form goes under it.
+        bulk_.set_title(bulk_title());
+        bulk_.open(feedback);
+        const gfx::Rect area = bulk_.content_rect();
+        bulk_form_.set_bounds({area.x - 10.0f, area.y, area.w + 20.0f, area.h});
+        bulk_form_.clear(); // a fresh sheet starts from the defaults above
+        fill_bulk(context);
+        bulk_form_.set_focus(0, true);
+        bulk_form_.set_active(true);
+        bulk_form_.enter();
+    }
+
+    std::string bulk_title() const
+    {
+        return "Send " + std::to_string(bulk_paths_.size()) +
+               (bulk_paths_.size() == 1 ? " capture" : " captures");
+    }
+
+    // What the sheet would send now.
+    std::vector<std::string> bulk_sendable(Context &context) const
+    {
+        std::vector<std::string> out;
+        for (const std::string &path : bulk_paths_)
+        {
+            const Capture *capture = context.model.find_capture(path);
+            if (capture != nullptr && !capture->blank && !(bulk_skip_sent_ && capture->uploaded))
+                out.push_back(path);
+        }
+        return out;
+    }
+
+    // (Re)builds the sheet's rows from its choices, keeping the focus.
+    void fill_bulk(Context &context)
+    {
+        if (bulk_form_.row_count() > 0)
+        {
+            bulk_to_ = std::max(0, bulk_form_.choice_index(bulk_to));
+            bulk_skip_sent_ = bulk_form_.toggle_value(bulk_skip_sent);
+            bulk_delete_ = bulk_form_.toggle_value(bulk_delete);
+        }
+        const int focus = bulk_form_.focus_id();
+        const Config &config = context.model.config();
+        std::vector<std::string> places = {"Usual for each game"};
+        bulk_ids_ = {""};
+        for (const Destination &d : config.destinations)
+            if (d.enabled && d.configured())
+            {
+                places.push_back(d.display_name());
+                bulk_ids_.push_back(d.id);
+            }
+        bulk_to_ = std::min(bulk_to_, static_cast<int>(bulk_ids_.size()) - 1);
+        const int count = static_cast<int>(bulk_sendable(context).size());
+        bulk_.set_title(bulk_title());
+        bulk_form_.clear();
+        bulk_form_.add_choice(bulk_to, "Send to", std::move(places), bulk_to_).description =
+            "Usual: its game's own destination, else the default";
+        bulk_form_.add_toggle(bulk_skip_sent, "Skip ones already sent", bulk_skip_sent_)
+            .description = "Captures with a check mark stay where they are";
+        bulk_form_.add_toggle(bulk_delete, "Delete once sent", bulk_delete_).description =
+            "From the console, each only after it has arrived; can't be undone";
+        ui::FormRow &go = bulk_form_.add_action(
+            bulk_go,
+            count == 0 ? std::string("Nothing to send")
+                       : "Send " + std::to_string(count) + (count == 1 ? " capture" : " captures"));
+        go.disabled = count == 0;
+        go.description = "It goes on in the background, even after you close PShare";
+        if (focus != 0)
+            bulk_form_.focus_row(focus, true);
+    }
+
+    std::string bulk_destination_name(Context &context) const
+    {
+        const std::string &id = bulk_ids_[static_cast<std::size_t>(bulk_to_)];
+        const Destination *d = id.empty() ? nullptr : context.model.config().find(id);
+        return d != nullptr ? d->display_name() : std::string("each game's destination");
+    }
+
+    void confirm_bulk(Context &context, ui::Feedback &feedback)
+    {
+        if (!bulk_delete_)
+        {
+            start_bulk(context, feedback);
+            return;
+        }
+        const int count = static_cast<int>(bulk_sendable(context).size());
+        ui::DialogContent content;
+        content.icon = ui::StatusKind::warning;
+        content.title = "Delete each one once it's sent?";
+        content.body = "PShare sends " + std::to_string(count) +
+                       (count == 1 ? " capture" : " captures") + " to " +
+                       bulk_destination_name(context) +
+                       " and deletes each from the PS5 as soon as it has arrived. Ones that "
+                       "fail to send are kept.\nDeleting can't be undone.";
+        content.buttons = {{"Cancel", ui::ButtonKind::secondary},
+                           {"Send and delete", ui::ButtonKind::primary, true}};
+        content.default_button = 0;
+        confirming_ = Confirm::send_then_delete;
+        confirm_.open(std::move(content), feedback);
+    }
+
+    void start_bulk(Context &context, ui::Feedback &feedback)
+    {
+        const std::vector<std::string> paths = bulk_sendable(context);
+        const std::string &id = bulk_ids_[static_cast<std::size_t>(bulk_to_)];
+        std::string why;
+        const int taken = context.model.send_batch(paths, id, bulk_delete_, &why);
+        if (taken == 0)
+        {
+            feedback.play(hui::audio::Cue::error);
+            context.toasts.push(ui::StatusKind::warning, why);
+            return;
+        }
+        feedback.play(hui::audio::Cue::launch);
+        context.toasts.push(ui::StatusKind::info,
+                            "Sending " + std::to_string(taken) +
+                                (taken == 1 ? " capture" : " captures"),
+                            "to " + bulk_destination_name(context) +
+                                (bulk_delete_ ? ", deleting each once sent" : ""),
+                            3.0f);
+        bulk_.close(feedback);
+        stop_selecting();
+    }
+
+    void ask_delete(Context &context, std::vector<std::string> paths, ui::Feedback &feedback)
+    {
+        if (paths.empty())
+        {
+            ui::refuse(feedback, grid_.style, InputFrame{}, refusal_);
+            return;
+        }
+        int unsent = 0;
+        for (const std::string &path : paths)
+            if (const Capture *capture = context.model.find_capture(path))
+                unsent += capture->uploaded ? 0 : 1;
+        const int count = static_cast<int>(paths.size());
+        ui::DialogContent content;
+        content.icon = ui::StatusKind::warning;
+        content.title = "Delete " + std::to_string(count) +
+                        (count == 1 ? " capture" : " captures") + " from the console?";
+        content.body =
+            std::string(count == 1 ? "It's" : "They're") +
+            " removed from the PS5 for good, Media Gallery included." +
+            (unsent > 0 ? "\n" + std::to_string(unsent) + " of them " +
+                              (unsent == 1 ? "hasn't" : "haven't") + " been sent anywhere."
+                        : std::string()) +
+            "\nDeleting can't be undone.";
+        content.buttons = {{"Keep", ui::ButtonKind::secondary},
+                           {"Delete", ui::ButtonKind::primary, true}};
+        content.default_button = 0;
+        confirming_ = Confirm::delete_now;
+        confirm_paths_ = std::move(paths);
+        confirm_.open(std::move(content), feedback);
     }
 
     void set_zone(Zone zone)
@@ -634,6 +1035,10 @@ class CapturesPage final : public Page
         }
         grid_.set_items(std::move(items));
         grid_.set_focus(keep, true);
+        // A selection keeps only what is still shown.
+        for (auto it = chosen_.begin(); it != chosen_.end();)
+            it = std::find(paths_.begin(), paths_.end(), *it) == paths_.end() ? chosen_.erase(it)
+                                                                              : std::next(it);
         // An empty grid cannot hold the focus; the first captures take it back.
         if (view_.empty() && zone_ == Zone::grid)
             set_zone(Zone::tabs);
@@ -854,7 +1259,7 @@ class CapturesPage final : public Page
         send_to.chevron = true;
         send_to.tag = action_send_to;
         items.push_back(send_to);
-        if (!capture->item.video())
+        if (capture->item.web_image() || capture->item.jxr())
         {
             ui::ListItem view;
             view.title = "View full screen";
@@ -1070,7 +1475,23 @@ class CapturesPage final : public Page
                        art.y + art.h - r * 2.0f - 14.0f + r * 0.45f, r * 1.1f, r * 1.1f},
                       rgb(palette::cream));
         }
-        if (capture.failed && !capture.uploaded)
+        if (selecting_)
+        {
+            // Selecting: a ring on what is chosen, and a round tick box on every card.
+            const bool chosen = chosen_.count(capture.item.path) != 0;
+            if (chosen)
+                list.bordered_rect(art, radius, gfx::Color{0, 0, 0, 0}, 5.0f, rgb(palette::coral));
+            const float cx = art.x + art.w - 26.0f;
+            const float cy = art.y + 26.0f;
+            list.circle(cx, cy, 17.0f, chosen ? rgb(palette::coral) : rgb(palette::ink, 0.6f));
+            if (chosen)
+                draw_icon(list, Icon::check, {cx - 11.0f, cy - 11.0f, 22.0f, 22.0f},
+                          rgb(palette::ink));
+            else
+                list.bordered_rect({cx - 15.0f, cy - 15.0f, 30.0f, 30.0f}, 15.0f,
+                                   gfx::Color{0, 0, 0, 0}, 2.5f, rgb(0xffffff, 0.85f));
+        }
+        else if (capture.failed && !capture.uploaded)
         {
             const float cx = art.x + art.w - 24.0f;
             const float cy = art.y + 24.0f;
@@ -1141,6 +1562,22 @@ class CapturesPage final : public Page
     ui::Dialog unreadable_;
     std::vector<std::string> unreadable_paths_;
     bool unreadable_pending_ = false;
+    // Selecting captures (Options > Select captures).
+    bool selecting_ = false;
+    std::set<std::string> chosen_;
+    mutable std::string select_hint_; // "Select (12)": the hint bar keeps a pointer
+    // The "Send ..." sheet and what it is about.
+    ui::Sheet bulk_;
+    ui::Form bulk_form_;
+    std::vector<std::string> bulk_paths_;
+    std::vector<std::string> bulk_ids_; // destination id per "Send to" choice; "" = usual
+    int bulk_to_ = 0;
+    bool bulk_skip_sent_ = true;
+    bool bulk_delete_ = false;
+    // Asking before deleting.
+    ui::Dialog confirm_;
+    Confirm confirming_ = Confirm::none;
+    std::vector<std::string> confirm_paths_;
     ui::ListView actions_;
     ui::Menu destinations_;
     ui::Sheet picker_; // "Show": the order, then every game with its counts
