@@ -104,6 +104,14 @@ bool capture_reads_blank(const std::string &path);
 bool delete_capture(const std::string &path, const std::string &photo_root,
                     const std::string &video_root, std::string *error);
 
+// "Delete once sent" when the deleting has to wait: pshared, a payload, may not
+// be allowed to delete captures, so it lists them in Paths::pending_deletes()
+// and the app deletes them. Adding appends a line; deleting takes the list
+// over (renamed first, so pshared can keep adding), deletes each capture and
+// puts back the ones that could not go. Returns how many were deleted.
+bool add_pending_delete(const Paths &paths, const std::string &capture);
+int delete_pending_captures(const Paths &paths);
+
 // The name's extension says screenshot or video; false for anything else.
 bool capture_kind(std::string_view file, MediaKind *kind);
 // YYYYMMDD_HHMMSS or 14 digits in a row, anywhere in the name.

@@ -65,6 +65,17 @@ for source in "${sources[@]}"; do
         fi
     fi
 done
+# stb_image (core/picture.cpp) is vendored C; built as published, without warnings.
+for source in "$root/src/third_party/stb_image/stb_image.c" \
+    "$root/src/third_party/stb_image/stb_image_write.c"; do
+    relative=${source#"$root/"}
+    object="$build/obj/${relative//\//_}.o"
+    objects+=("$object")
+    if [[ ! -f $object || $source -nt $object ]]; then
+        "$sdk/bin/prospero-clang" -std=c11 -O2 -g0 -w -c "$source" -o "$object" &
+        pids+=($!)
+    fi
+done
 for pid in "${pids[@]}"; do wait "$pid"; done
 printf '%s\n' "$build_id" > "$build/build-id"
 

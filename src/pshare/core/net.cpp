@@ -170,6 +170,7 @@ std::string DaemonStatus::serialize() const
     out += "destination=" + destination + "\n";
     out += "ip=" + ip + "\n";
     out += "job=" + std::to_string(job) + "\n";
+    out += "delete_ask=" + std::to_string(delete_ask) + "\n";
     return out;
 }
 
@@ -216,6 +217,8 @@ DaemonStatus DaemonStatus::parse(std::string_view text)
             status.total = static_cast<std::uint64_t>(parse_int(value, 0));
         else if (key == "job")
             status.job = static_cast<int>(parse_int(value, 0));
+        else if (key == "delete_ask")
+            status.delete_ask = static_cast<int>(parse_int(value, 0));
         else if (key == "ip")
             status.ip = value;
     }

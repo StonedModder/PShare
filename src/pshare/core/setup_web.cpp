@@ -66,6 +66,11 @@ padding:16px;margin:14px 0}
 .tag{font-size:12px;font-weight:600;color:var(--bg);background:var(--aqua);
 border-radius:99px;padding:2px 9px}
 .off .tag{background:var(--muted)}
+summary{cursor:pointer;list-style:none}summary::-webkit-details-marker{display:none}
+summary h2::after{content:"\203A";margin-left:auto;font-size:24px;color:var(--muted);
+transition:transform .15s}
+details[open] summary h2::after{transform:rotate(90deg)}
+details.card:not([open]) h2{margin:0}
 label{display:block;font-size:13px;color:var(--muted);margin:10px 0 4px}
 input,select,textarea{width:100%;font:inherit;color:var(--text);background:#17134180;
 border:2px solid var(--line);border-radius:12px;padding:10px 12px}
@@ -88,6 +93,18 @@ background:#0e0b28cc;color:#fff;font-size:13px;display:grid;place-items:center}
 .cap p{margin:6px 9px 0;font-size:13px;font-weight:600;white-space:nowrap;overflow:hidden;
 text-overflow:ellipsis}
 .cap small{display:block;margin:0 9px}
+.cap{position:relative}
+.tick{position:absolute;left:6px;top:6px;z-index:2;width:30px;height:30px;margin:0;
+accent-color:var(--coral);cursor:pointer}
+.sendall{display:grid;grid-template-columns:1fr auto;gap:8px 10px;align-items:center}
+.sendall label{margin:0}.sendall button{margin:0;width:auto;padding:12px 16px}
+.check{display:flex;gap:8px;align-items:center;color:var(--text);font-size:14px}
+.check input{width:20px;height:20px;accent-color:var(--aqua)}
+.bar{position:sticky;bottom:10px;z-index:5;display:flex;flex-wrap:wrap;gap:8px;align-items:center;
+margin-top:14px;padding:10px;border-radius:16px;background:var(--panel);border:2px solid var(--coral)}
+.bar b{flex:1 1 100%}.bar button{flex:1;margin:0;padding:11px;font-size:15px}
+.bar .del{background:var(--coral);box-shadow:0 5px 0 #a8355a}
+.bar .page{background:var(--line);color:var(--text);box-shadow:none}
 .cap a.dl{display:block;margin:6px 9px 9px;text-align:center;font-size:13px;font-weight:700;
 color:var(--bg);background:var(--aqua);border-radius:9px;padding:6px;text-decoration:none}
 .pages{display:flex;justify-content:space-between;margin:16px 0}
@@ -163,12 +180,33 @@ std::string gallery_page(const std::vector<GalleryItem> &items, int page_index, 
     if (items.empty())
         body += "<div class=\"card\"><h2>No captures yet</h2><p><small>Take a screenshot "
                 "with the Create button.</small></p></div>";
+    // One form for sending and deleting (see GalleryFilter); it comes back here.
+    body += "<form method=\"post\" action=\"/act\" id=\"act\">";
+    body += "<input type=\"hidden\" name=\"game\" value=\"" + html_escape(filter.game) + "\">";
+    body += "<input type=\"hidden\" name=\"order\" value=\"";
+    body += filter.oldest_first ? "old" : "new";
+    body += "\"><input type=\"hidden\" name=\"page\" value=\"" + std::to_string(page_index) + "\">";
+    if (!items.empty())
+    {
+        body += "<div class=\"card sendall\"><select name=\"d\"><option value=\"\">Each "
+                "game's usual destination</option>";
+        for (const auto &[id, name] : filter.destinations)
+            body += "<option value=\"" + html_escape(id) + "\">" + html_escape(name) + "</option>";
+        body += "</select><button name=\"act\" value=\"send-all\">Send all " +
+                std::to_string(filter.total) +
+                "</button><label class=\"check\"><input type=\"checkbox\" name=\"skip\" "
+                "checked> Skip ones already sent</label></div>";
+    }
     body += "<div class=\"grid\">";
+    int index = 0;
     for (const GalleryItem &item : items)
     {
         const std::string source = "/file?p=" + url_encode(item.path);
         const std::string view = "/view?p=" + url_encode(item.path);
-        body += "<div class=\"cap\"><a class=\"open\" href=\"";
+        body += "<div class=\"cap\"><input class=\"tick\" type=\"checkbox\" aria-label=\"Select\" "
+                "name=\"s." +
+                std::to_string(index++) + "\" value=\"" + html_escape(item.path) + "\">";
+        body += "<a class=\"open\" href=\"";
         body += html_escape(view);
         body += "\">";
         if (item.video)
@@ -193,6 +231,23 @@ std::string gallery_page(const std::vector<GalleryItem> &items, int page_index, 
         body += "\">Download</a></div>";
     }
     body += "</div>";
+    // What the ticks are for; a little script shows it only once one is ticked.
+    if (!items.empty())
+        body += "<div class=\"bar\" id=\"bar\"><b id=\"count\">Ticked captures</b>"
+                "<button type=\"button\" class=\"page\" id=\"all\">Select page</button>"
+                "<button name=\"act\" value=\"send\">Send</button>"
+                "<button name=\"act\" value=\"delete\" class=\"del\">Delete&hellip;</button>"
+                "</div><script>(function(){var t=[].slice.call(document.querySelectorAll('.tick'))"
+                ",b=document.getElementById('bar'),c=document.getElementById('count'),"
+                "a=document.getElementById('all');function u(){var n=t.filter(function(x){"
+                "return x.checked}).length;b.style.display=n?'':'none';c.textContent=n+' selected"
+                "';a.textContent=n==t.length?'Select none':'Select page'}t.forEach(function(x){"
+                "x.onchange=u});a.onclick=function(){var on=t.some(function(x){return !x.checked"
+                "});t.forEach(function(x){x.checked=on});u()};document.getElementById('act')."
+                "onsubmit=function(e){var s=e.submitter;if(s&&s.value=='delete'&&!confirm("
+                "'Ask the PS5 to delete these? You confirm there.'))e.preventDefault()};u()})()"
+                "</script>";
+    body += "</form>";
     if (pages > 1)
     {
         body += "<div class=\"pages\">";
@@ -747,12 +802,14 @@ std::string setup_page(const Config &config, std::string_view notice, bool notic
     for (const Destination &d : config.destinations)
     {
         const std::string prefix = "d." + d.id + ".";
-        body += d.enabled ? "<section class=\"card\">" : "<section class=\"card off\">";
-        body += "<h2>";
+        // Each destination folds up under its name, so the page stays short. The
+        // fields of a closed one are still sent, and an empty secret keeps its value.
+        body += d.enabled ? "<details class=\"card\">" : "<details class=\"card off\">";
+        body += "<summary><h2>";
         body += html_escape(d.display_name());
         body += " <span class=\"tag\">";
         body += html_escape(type_label(d.type));
-        body += "</span></h2>";
+        body += "</span></h2></summary>";
         yes_no(&body, prefix + "enabled", "Enabled", d.enabled);
         yes_no(&body, prefix + "also", "Also gets every new capture",
                std::find(config.also_send.begin(), config.also_send.end(), d.id) !=
@@ -765,13 +822,6 @@ std::string setup_page(const Config &config, std::string_view notice, bool notic
                          "https://discord.com/api/webhooks/...");
             text_field(&body, prefix + "username", "Post as", d.username);
             text_field(&body, prefix + "message", "Message", d.message);
-            body += "<div class=\"row\"><div>";
-            text_field(&body, prefix + "max_mb", "Size limit (MB)", std::to_string(d.max_mb),
-                       "number");
-            body += "</div><div>";
-            text_field(&body, prefix + "fallback", "Bigger files go to", d.fallback, "text",
-                       "catbox");
-            body += "</div></div>";
             break;
         case DestinationType::telegram:
             secret_field(&body, prefix + "token", "Bot token", d.token);
@@ -795,6 +845,11 @@ std::string setup_page(const Config &config, std::string_view notice, bool notic
             text_field(&body, prefix + "username", "Account", d.username);
             secret_field(&body, prefix + "token", "Password", d.token);
             break;
+        case DestinationType::onedrive:
+            text_field(&body, prefix + "client_id", "Client ID", d.client_id);
+            secret_field(&body, prefix + "token", "Refresh token", d.token);
+            text_field(&body, prefix + "path", "Folder in OneDrive", d.path, "text", "PShare");
+            break;
         case DestinationType::http:
         case DestinationType::count:
             text_field(&body, prefix + "url", "Upload URL", d.url, "url");
@@ -808,7 +863,20 @@ std::string setup_page(const Config &config, std::string_view notice, bool notic
             body += "></textarea>";
             break;
         }
-        body += "</section>";
+        if (d.has_size_limit())
+        {
+            const int ceiling = d.service_ceiling_mb();
+            body += "<div class=\"row\"><div>";
+            text_field(&body, prefix + "max_mb",
+                       ceiling > 0 ? "Size limit (MB, up to " + std::to_string(ceiling) + ")"
+                                   : std::string("Size limit (MB, 0: none)"),
+                       std::to_string(d.max_mb), "number");
+            body += "</div><div>";
+            text_field(&body, prefix + "fallback", "Bigger files go to", d.fallback, "text",
+                       "catbox");
+            body += "</div></div>";
+        }
+        body += "</details>";
     }
     body += "<p><small>Placeholders for messages: {type} {game} {title_id} {date} {time} "
             "{file} {size} {link}</small></p>";
@@ -852,6 +920,7 @@ int apply_setup_form(const std::map<std::string, std::string> &form, Config *con
             changed += set_text(&d.url, form, prefix + "url");
         changed += set_secret(&d.token, form, prefix + "token");
         changed += set_text(&d.chat_id, form, prefix + "chat_id");
+        changed += set_text(&d.client_id, form, prefix + "client_id");
         changed += set_text(&d.username, form, prefix + "username");
         changed += set_text(&d.message, form, prefix + "message");
         changed += set_text(&d.field, form, prefix + "field");
@@ -874,7 +943,8 @@ int apply_setup_form(const std::map<std::string, std::string> &form, Config *con
                 }
             }
         }
-        changed += set_int(&d.max_mb, form, prefix + "max_mb", 0, 100000, errors);
+        changed += set_int(&d.max_mb, form, prefix + "max_mb", 0,
+                           d.service_ceiling_mb() > 0 ? d.service_ceiling_mb() : 100000, errors);
         {
             std::string fallback = d.fallback;
             if (set_text(&fallback, form, prefix + "fallback"))

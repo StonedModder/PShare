@@ -40,8 +40,9 @@ struct DaemonStatus
     std::string destination; // where the upload in progress goes (state "uploading")
     std::uint64_t sent = 0;  // ... and how far it is
     std::uint64_t total = 0;
-    int job = 0;    // the QUEUE number being sent (0: none, or automatic)
-    std::string ip; // the console's address, as the daemon sees it
+    int job = 0;        // the QUEUE number being sent (0: none, or automatic)
+    int delete_ask = 0; // a browser asks to delete this many captures (DELETEASK)
+    std::string ip;     // the console's address, as the daemon sees it
 
     std::string serialize() const;
     static DaemonStatus parse(std::string_view text);

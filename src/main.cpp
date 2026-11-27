@@ -106,8 +106,8 @@ bool load_font(hui::gfx::Renderer &renderer, const std::string &path, hui::gfx::
 
 std::uint32_t load_art(hui::gfx::Renderer &renderer, const std::string &path, float *aspect)
 {
-    app::Picture picture;
-    if (!app::decode_picture(path, 2048, 2048, &picture))
+    Picture picture;
+    if (!decode_picture(path, 2048, 2048, &picture))
     {
         hui::sys::log("[PShare] art %s missing", path.c_str());
         return 0;
