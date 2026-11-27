@@ -68,8 +68,10 @@ def fetch_lapy():
     staging = Path(tempfile.mkdtemp(prefix="lapy-git-", dir=CACHE))
     try:
         subprocess.run(["git", "init", "-q"], cwd=staging, check=True)
+        # blackbearreloaded's fork is gone from GitHub; the pinned commit is also
+        # in ArkSama's upstream repository (HEAD is checked against LAPY_COMMIT).
         subprocess.run(["git", "remote", "add", "origin",
-                        "https://github.com/blackbearreloaded/PS5-Lapy-JB-Daemon.git"],
+                        "https://github.com/ArkSama/PS5-Lapy-JB-Daemon.git"],
                        cwd=staging, check=True)
         subprocess.run(["git", "fetch", "-q", "--depth", "1", "origin", LAPY_COMMIT],
                        cwd=staging, check=True)
