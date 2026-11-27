@@ -300,7 +300,7 @@ bool json_find_string(std::string_view json, std::string_view key, std::string *
                 if (c == '\\' && p + 1 < json.size())
                 {
                     const char e = json[++p];
-                    out.push_back(e == 'n' ? '\n' : e == 't' ? '\t' : e);
+                    out.push_back(e == 'n' ? '\n' : e == 'r' ? '\r' : e == 't' ? '\t' : e);
                     continue;
                 }
                 out.push_back(c);

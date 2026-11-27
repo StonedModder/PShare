@@ -18,6 +18,7 @@
 #include "pshare/core/upload.hpp"
 #include "pshare/core/watcher.hpp"
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <ctime>
@@ -177,6 +178,7 @@ TEST(default_config_loads)
     CHECK_EQ(config.default_destination, "discord");
     CHECK_EQ(config.find("discord")->fallback, "catbox");
     CHECK_EQ(config.find("discord")->max_mb, 10);
+    CHECK(config.find("mac") != nullptr && config.find("mac")->type == DestinationType::smb);
     // Discord has no webhook yet: the first configured one (catbox) is used.
     const Destination *chosen = config.destination_for("PPSA01234");
     CHECK(chosen != nullptr && chosen->id == "catbox");
@@ -527,6 +529,148 @@ TEST(retries_transient_failures)
                                                      nullptr, fake_transport, &server, false);
     CHECK(!failed.ok);
     CHECK_EQ(failed.attempts, 3);
+}
+
+struct FakeDrive
+{
+    std::vector<HttpRequest> requests;
+    std::uint64_t size = 0;
+    bool expired = false;
+};
+
+HttpResult fake_drive(const HttpRequest &request, UploadProgress *, void *user)
+{
+    FakeDrive *drive = static_cast<FakeDrive *>(user);
+    drive->requests.push_back(request);
+    HttpResult result;
+    result.transport_ok = true;
+    result.status = 200;
+    if (request.url.find("login.microsoftonline.com") != std::string::npos)
+    {
+        if (drive->expired)
+        {
+            result.status = 400;
+            result.body =
+                R"({"error":"invalid_grant","error_description":"AADSTS70000.\r\nTrace"})";
+        }
+        else
+        {
+            result.body = R"({"token_type":"Bearer","access_token":"at","refresh_token":"r2"})";
+        }
+    }
+    else if (request.url.find("createUploadSession") != std::string::npos)
+    {
+        result.body = R"({"uploadUrl":"https://up.example/s1"})";
+    }
+    else if (request.raw_offset + request.raw_length < drive->size)
+    {
+        result.status = 202;
+        result.body = R"({"nextExpectedRanges":["0-"]})";
+    }
+    else
+    {
+        result.status = 201;
+        result.body = R"({"id":"1","name":"x.webm","webUrl":"https://onedrive.live.com/x"})";
+    }
+    return result;
+}
+
+bool has_header(const HttpRequest &request, const std::string &header)
+{
+    return std::find(request.headers.begin(), request.headers.end(), header) !=
+           request.headers.end();
+}
+
+TEST(onedrive_signs_in_and_sends_slices)
+{
+    Config config = ready_config();
+    Destination &drive = *config.find("onedrive");
+    CHECK(!drive.configured());
+    CHECK_EQ(drive.path, "PShare");
+    drive.client_id = "app-1";
+    drive.token = "r1";
+    CHECK(drive.configured());
+    const std::string token_file = scratch() + "/onedrive-onedrive.token";
+    const std::uint64_t slice = 10ull << 20;
+    const MediaItem clip = sample_item("/v/PS5/PPSA01234/20261009_183501_00000002.webm", slice + 5);
+    FakeDrive server;
+    server.size = clip.size;
+    UploadProgress progress;
+    UploadOutcome outcome = send_to_onedrive(config, drive, clip, "Astro: Bot?", &progress,
+                                             fake_drive, &server, false, token_file);
+    CHECK(outcome.ok);
+    CHECK_EQ(outcome.link, "https://onedrive.live.com/x");
+    CHECK_EQ(progress.sent.load(), clip.size);
+    CHECK_EQ(server.requests.size(), 4u);
+    if (server.requests.size() == 4)
+    {
+        CHECK(server.requests[0].text.find("client_id=app-1") != std::string::npos);
+        CHECK(server.requests[0].text.find("refresh_token=r1&") != std::string::npos);
+        CHECK_EQ(server.requests[1].url, "https://graph.microsoft.com/v1.0/me/drive/root:/PShare/"
+                                         "Astro_%20Bot_/20261009_183501_00000002.webm"
+                                         ":/createUploadSession");
+        CHECK(has_header(server.requests[1], "Authorization: Bearer at"));
+        const HttpRequest &first = server.requests[2];
+        const HttpRequest &last = server.requests[3];
+        CHECK_EQ(first.method, "PUT");
+        CHECK_EQ(first.url, "https://up.example/s1");
+        CHECK(has_header(first, "Content-Range: bytes 0-10485759/10485765"));
+        CHECK_EQ(first.raw_length, slice);
+        CHECK(has_header(last, "Content-Range: bytes 10485760-10485764/10485765"));
+        CHECK_EQ(last.raw_offset, slice);
+        CHECK_EQ(last.raw_length, 5u);
+        // The upload session URL is already authorized; the token stays with Graph.
+        CHECK(!has_header(last, "Authorization: Bearer at"));
+    }
+    std::string saved;
+    CHECK(read_text_file(token_file, &saved));
+    CHECK_EQ(saved, "r1\nr2\n");
+
+    // The renewed token is used next, until a new one is typed in.
+    server = FakeDrive{};
+    server.size = clip.size;
+    outcome = send_to_onedrive(config, drive, clip, "Astro", nullptr, fake_drive, &server, false,
+                               token_file);
+    CHECK(outcome.ok);
+    CHECK(!server.requests.empty() &&
+          server.requests[0].text.find("refresh_token=r2&") != std::string::npos);
+    drive.token = "r9";
+    server.requests.clear();
+    send_to_onedrive(config, drive, clip, "Astro", nullptr, fake_drive, &server, false, token_file);
+    CHECK(!server.requests.empty() &&
+          server.requests[0].text.find("refresh_token=r9&") != std::string::npos);
+
+    server = FakeDrive{};
+    server.expired = true;
+    outcome = send_to_onedrive(config, drive, clip, "Astro", nullptr, fake_drive, &server, false,
+                               token_file);
+    CHECK(!outcome.ok);
+    CHECK(outcome.error.find("expired") != std::string::npos);
+    CHECK_EQ(server.requests.size(), 1u);
+
+    HttpRequest request;
+    std::string error;
+    CHECK(!plan_request(drive, clip, caption_info(clip, "Astro"), {}, &request, &error));
+
+    IniDocument document;
+    document.parse(default_config_text());
+    store_config(config, &document);
+    IniDocument again;
+    again.parse(document.write());
+    Config back;
+    load_config(again, &back, nullptr);
+    CHECK_EQ(back.find("onedrive")->client_id, "app-1");
+    CHECK_EQ(back.find("onedrive")->token, "r9");
+    CHECK_EQ(back.find("onedrive")->path, "PShare");
+    CHECK_EQ(back.find("usb")->path, "usb");
+
+    std::vector<std::string> errors;
+    CHECK_EQ(apply_setup_form({{"d.onedrive.client_id", " app-2 "}}, &back, &errors), 1);
+    CHECK_EQ(back.find("onedrive")->client_id, "app-2");
+    CHECK(setup_page(back, "", false).find("name=\"d.onedrive.client_id\"") != std::string::npos);
+    Paths paths;
+    paths.data_root = "/x";
+    CHECK_EQ(paths.onedrive_token("onedrive"), "/x/onedrive-onedrive.token");
 }
 
 // ---- history -------------------------------------------------------------------

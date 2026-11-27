@@ -50,6 +50,11 @@ struct Paths
     {
         return data_root + "/thumbs";
     }
+    // The newest OneDrive refresh token for a destination (upload_onedrive.cpp).
+    std::string onedrive_token(const std::string &id) const
+    {
+        return data_root + "/onedrive-" + id + ".token";
+    }
 };
 
 constexpr int kControlPort = 9077; // pshared listens on 127.0.0.1 only
@@ -63,9 +68,10 @@ enum class DestinationType : std::uint8_t
     telegram,
     catbox,
     litterbox,
-    http,   // any multipart/form-data endpoint
-    folder, // a copy on a drive: a USB stick or the extended storage
-    smb,    // a copy in a shared folder on a PC (Windows share, Samba)
+    http,     // any multipart/form-data endpoint
+    folder,   // a copy on a drive: a USB stick or the extended storage
+    smb,      // a copy in a shared folder on a PC or Mac (Windows share, macOS, Samba)
+    onedrive, // a folder in OneDrive, through Microsoft Graph
     count,
 };
 
@@ -79,8 +85,9 @@ struct Destination
     DestinationType type = DestinationType::discord;
     std::string name;                   // shown in the app; the id when empty
     std::string url;                    // webhook, server, endpoint, or smb://host/share/folder
-    std::string path = "usb";           // folder: "usb" (the first drive found) or an absolute path
-    std::string token;                  // telegram bot token, catbox userhash, smb password
+    std::string path = "usb";           // folder: "usb" or an absolute path; onedrive: its folder
+    std::string token;                  // bot token, catbox userhash, smb password, refresh token
+    std::string client_id;              // onedrive: the app registration's client ID
     std::string chat_id;                // telegram
     std::string username;               // discord: the poster's name; smb: the account
     std::string message;                // caption template, see expand_caption()

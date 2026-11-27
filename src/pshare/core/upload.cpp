@@ -191,6 +191,8 @@ bool plan_request(const Destination &destination, const MediaItem &item, const C
     case DestinationType::folder:
     case DestinationType::smb:
         return fail("Drives and shares are copied, not sent over HTTP");
+    case DestinationType::onedrive:
+        return fail("OneDrive is sent in several requests, not one");
     default:
         return fail("Unknown destination type");
     }
@@ -354,6 +356,9 @@ UploadOutcome upload_capture_with(const Config &config, const Destination &desti
         return copy_to_folder(destination, Paths{}, item, game, progress);
     if (destination.type == DestinationType::smb)
         return copy_to_share(destination, item, game, progress);
+    if (destination.type == DestinationType::onedrive)
+        return send_to_onedrive(config, destination, item, game, progress, transport, user,
+                                pause_between_tries, Paths{}.onedrive_token(destination.id));
     UploadOutcome outcome;
     outcome.destination = destination.id;
     const CaptionInfo caption = caption_info(item, game);

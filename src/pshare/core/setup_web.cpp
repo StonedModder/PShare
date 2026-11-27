@@ -795,6 +795,11 @@ std::string setup_page(const Config &config, std::string_view notice, bool notic
             text_field(&body, prefix + "username", "Account", d.username);
             secret_field(&body, prefix + "token", "Password", d.token);
             break;
+        case DestinationType::onedrive:
+            text_field(&body, prefix + "client_id", "Client ID", d.client_id);
+            secret_field(&body, prefix + "token", "Refresh token", d.token);
+            text_field(&body, prefix + "path", "Folder in OneDrive", d.path, "text", "PShare");
+            break;
         case DestinationType::http:
         case DestinationType::count:
             text_field(&body, prefix + "url", "Upload URL", d.url, "url");
@@ -852,6 +857,7 @@ int apply_setup_form(const std::map<std::string, std::string> &form, Config *con
             changed += set_text(&d.url, form, prefix + "url");
         changed += set_secret(&d.token, form, prefix + "token");
         changed += set_text(&d.chat_id, form, prefix + "chat_id");
+        changed += set_text(&d.client_id, form, prefix + "client_id");
         changed += set_text(&d.username, form, prefix + "username");
         changed += set_text(&d.message, form, prefix + "message");
         changed += set_text(&d.field, form, prefix + "field");
