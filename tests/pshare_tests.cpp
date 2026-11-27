@@ -18,6 +18,7 @@
 #include "pshare/core/upload.hpp"
 #include "pshare/core/watcher.hpp"
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <ctime>
@@ -176,7 +177,8 @@ TEST(default_config_loads)
     CHECK(config.find("catbox") != nullptr);
     CHECK_EQ(config.default_destination, "discord");
     CHECK_EQ(config.find("discord")->fallback, "catbox");
-    CHECK_EQ(config.find("discord")->max_mb, 10);
+    CHECK_EQ(config.find("discord")->max_mb, 20);
+    CHECK(config.find("mac") != nullptr && config.find("mac")->type == DestinationType::smb);
     // Discord has no webhook yet: the first configured one (catbox) is used.
     const Destination *chosen = config.destination_for("PPSA01234");
     CHECK(chosen != nullptr && chosen->id == "catbox");
@@ -510,6 +512,29 @@ TEST(big_files_go_through_the_fallback)
     }
 }
 
+TEST(big_files_can_go_to_a_drive)
+{
+    // Discord's fallback is a folder: the clip is copied there, and the post
+    // says where instead of carrying a link.
+    Config config = ready_config();
+    const std::string root = scratch() + "/fallback";
+    std::system(("mkdir -p '" + root + "/video/PS5/PPSA01234' '" + root + "/drive'").c_str());
+    const std::string file = root + "/video/PS5/PPSA01234/20261009_183600_00000002.webm";
+    write_file(file, std::string(4000, 'v'));
+    MediaItem clip = sample_item(file, 30ull << 20); // too big for Discord, as far as it knows
+    Destination &usb = *config.find("usb");
+    usb.enabled = true;
+    usb.path = root + "/drive";
+    config.find("discord")->fallback = "usb";
+    FakeServer server;
+    const UploadOutcome outcome = upload_capture_with(
+        config, *config.find("discord"), clip, "Astro", nullptr, fake_transport, &server, false);
+    CHECK(outcome.ok);
+    CHECK(file_exists(root + "/drive/PShare/Astro/20261009_183600_00000002.webm"));
+    CHECK_EQ(server.urls.size(), 1u); // only Discord, with the note
+    CHECK(outcome.link.find("saved to USB drive") != std::string::npos);
+}
+
 TEST(retries_transient_failures)
 {
     Config config = ready_config();
@@ -527,6 +552,183 @@ TEST(retries_transient_failures)
                                                      nullptr, fake_transport, &server, false);
     CHECK(!failed.ok);
     CHECK_EQ(failed.attempts, 3);
+}
+
+struct FakeDrive
+{
+    std::vector<HttpRequest> requests;
+    std::uint64_t size = 0;
+    bool expired = false;
+};
+
+HttpResult fake_drive(const HttpRequest &request, UploadProgress *, void *user)
+{
+    FakeDrive *drive = static_cast<FakeDrive *>(user);
+    drive->requests.push_back(request);
+    HttpResult result;
+    result.transport_ok = true;
+    result.status = 200;
+    if (request.url.find("login.microsoftonline.com") != std::string::npos)
+    {
+        if (drive->expired)
+        {
+            result.status = 400;
+            result.body =
+                R"({"error":"invalid_grant","error_description":"AADSTS70000.\r\nTrace"})";
+        }
+        else
+        {
+            result.body = R"({"token_type":"Bearer","access_token":"at","refresh_token":"r2"})";
+        }
+    }
+    else if (request.url.find("createUploadSession") != std::string::npos)
+    {
+        result.body = R"({"uploadUrl":"https://up.example/s1"})";
+    }
+    else if (request.method == "PUT" && request.raw_offset + request.raw_length < drive->size)
+    {
+        result.status = 202;
+        result.body = R"({"nextExpectedRanges":["0-"]})";
+    }
+    else if (request.url.find("/createLink") != std::string::npos)
+    {
+        result.status = 201;
+        result.body = R"({"id":"perm","link":{"type":"view","webUrl":"https://1drv.ms/v/share"}})";
+    }
+    else if (request.url.find("discord.com") != std::string::npos)
+    {
+        result.body = R"({"attachments":[]})";
+    }
+    else
+    {
+        // Graph can name who made it, and its id, before the item's own id.
+        result.status = 201;
+        result.body = R"({"createdBy":{"user":{"id":"someone"}},"id":"ITEM!1","name":"x.webm",)"
+                      R"("webUrl":"https://onedrive.live.com/x"})";
+    }
+    return result;
+}
+
+bool has_header(const HttpRequest &request, const std::string &header)
+{
+    return std::find(request.headers.begin(), request.headers.end(), header) !=
+           request.headers.end();
+}
+
+TEST(onedrive_signs_in_and_sends_slices)
+{
+    Config config = ready_config();
+    Destination &drive = *config.find("onedrive");
+    CHECK(!drive.configured());
+    CHECK_EQ(drive.path, "PShare");
+    drive.client_id = "app-1";
+    drive.token = "r1";
+    CHECK(drive.configured());
+    const std::string token_file = scratch() + "/onedrive-onedrive.token";
+    const std::uint64_t slice = 10ull << 20;
+    const MediaItem clip = sample_item("/v/PS5/PPSA01234/20261009_183501_00000002.webm", slice + 5);
+    FakeDrive server;
+    server.size = clip.size;
+    UploadProgress progress;
+    UploadOutcome outcome = send_to_onedrive(config, drive, clip, "Astro: Bot?", &progress,
+                                             fake_drive, &server, false, token_file);
+    CHECK(outcome.ok);
+    CHECK_EQ(outcome.link, "https://onedrive.live.com/x");
+    CHECK_EQ(progress.sent.load(), clip.size);
+    CHECK_EQ(server.requests.size(), 4u);
+    if (server.requests.size() == 4)
+    {
+        CHECK(server.requests[0].text.find("client_id=app-1") != std::string::npos);
+        CHECK(server.requests[0].text.find("refresh_token=r1&") != std::string::npos);
+        CHECK_EQ(server.requests[1].url, "https://graph.microsoft.com/v1.0/me/drive/root:/PShare/"
+                                         "Astro_%20Bot_/20261009_183501_00000002.webm"
+                                         ":/createUploadSession");
+        CHECK(has_header(server.requests[1], "Authorization: Bearer at"));
+        const HttpRequest &first = server.requests[2];
+        const HttpRequest &last = server.requests[3];
+        CHECK_EQ(first.method, "PUT");
+        CHECK_EQ(first.url, "https://up.example/s1");
+        CHECK(has_header(first, "Content-Range: bytes 0-10485759/10485765"));
+        CHECK_EQ(first.raw_length, slice);
+        CHECK(has_header(last, "Content-Range: bytes 10485760-10485764/10485765"));
+        CHECK_EQ(last.raw_offset, slice);
+        CHECK_EQ(last.raw_length, 5u);
+        // The upload session URL is already authorized; the token stays with Graph.
+        CHECK(!has_header(last, "Authorization: Bearer at"));
+    }
+    std::string saved;
+    CHECK(read_text_file(token_file, &saved));
+    CHECK_EQ(saved, "r1\nr2\n");
+
+    // The renewed token is used next, until a new one is typed in.
+    server = FakeDrive{};
+    server.size = clip.size;
+    outcome = send_to_onedrive(config, drive, clip, "Astro", nullptr, fake_drive, &server, false,
+                               token_file);
+    CHECK(outcome.ok);
+    CHECK(!server.requests.empty() &&
+          server.requests[0].text.find("refresh_token=r2&") != std::string::npos);
+    drive.token = "r9";
+    server.requests.clear();
+    send_to_onedrive(config, drive, clip, "Astro", nullptr, fake_drive, &server, false, token_file);
+    CHECK(!server.requests.empty() &&
+          server.requests[0].text.find("refresh_token=r9&") != std::string::npos);
+
+    server = FakeDrive{};
+    server.expired = true;
+    outcome = send_to_onedrive(config, drive, clip, "Astro", nullptr, fake_drive, &server, false,
+                               token_file);
+    CHECK(!outcome.ok);
+    CHECK(outcome.error.find("expired") != std::string::npos);
+    CHECK_EQ(server.requests.size(), 1u);
+
+    HttpRequest request;
+    std::string error;
+    CHECK(!plan_request(drive, clip, caption_info(clip, "Astro"), {}, &request, &error));
+
+    // A clip too big for Discord goes to OneDrive, and Discord gets a link anyone can open.
+    drive.token = "r1";
+    config.find("discord")->fallback = "onedrive";
+    const MediaItem big = sample_item(clip.path, 30ull << 20);
+    server = FakeDrive{};
+    server.size = big.size;
+    outcome = upload_capture_with(config, *config.find("discord"), big, "Astro", nullptr,
+                                  fake_drive, &server, false);
+    CHECK(outcome.ok);
+    CHECK_EQ(outcome.link, "https://1drv.ms/v/share");
+    bool linked = false;
+    for (const HttpRequest &each : server.requests)
+    {
+        if (each.url.find("/items/ITEM%211/createLink") != std::string::npos)
+            linked = true;
+        if (each.url.find("discord.com") != std::string::npos)
+            CHECK(part(each, "payload_json")->value.find("https://1drv.ms/v/share") !=
+                  std::string::npos);
+    }
+    CHECK(linked);
+    std::string top;
+    CHECK(json_top_string(R"({"a":{"id":"inner"},"id":"outer"})", "id", &top) && top == "outer");
+    CHECK(!json_top_string(R"({"a":{"id":"inner"}})", "id", &top));
+
+    IniDocument document;
+    document.parse(default_config_text());
+    store_config(config, &document);
+    IniDocument again;
+    again.parse(document.write());
+    Config back;
+    load_config(again, &back, nullptr);
+    CHECK_EQ(back.find("onedrive")->client_id, "app-1");
+    CHECK_EQ(back.find("onedrive")->token, "r1");
+    CHECK_EQ(back.find("onedrive")->path, "PShare");
+    CHECK_EQ(back.find("usb")->path, "usb");
+
+    std::vector<std::string> errors;
+    CHECK_EQ(apply_setup_form({{"d.onedrive.client_id", " app-2 "}}, &back, &errors), 1);
+    CHECK_EQ(back.find("onedrive")->client_id, "app-2");
+    CHECK(setup_page(back, "", false).find("name=\"d.onedrive.client_id\"") != std::string::npos);
+    Paths paths;
+    paths.data_root = "/x";
+    CHECK_EQ(paths.onedrive_token("onedrive"), "/x/onedrive-onedrive.token");
 }
 
 // ---- history -------------------------------------------------------------------
@@ -576,6 +778,30 @@ TEST(setup_requests_and_forms)
     CHECK_EQ(html_escape("<a href=\"x\">"), "&lt;a href=&quot;x&quot;&gt;");
 }
 
+TEST(size_limits_stay_within_the_service)
+{
+    Config config = ready_config();
+    Destination &discord = *config.find("discord");
+    CHECK_EQ(discord.service_ceiling_mb(), 100);
+    discord.max_mb = 0;
+    CHECK_EQ(discord.size_limit(), 20ull << 20);
+    CHECK(discord.has_size_limit());
+    CHECK(config.find("uguu")->has_size_limit());
+    CHECK(!config.find("usb")->has_size_limit());
+    CHECK(!config.find("onedrive")->has_size_limit());
+    CHECK_EQ(config.find("x0")->max_mb, 1024);
+    std::vector<std::string> errors;
+    CHECK_EQ(apply_setup_form({{"d.discord.max_mb", "150"}, {"d.catbox.max_mb", "100"}}, &config,
+                              &errors),
+             1);
+    CHECK_EQ(errors.size(), 1u);
+    CHECK_EQ(discord.max_mb, 0);
+    CHECK_EQ(config.find("catbox")->max_mb, 100);
+    const std::string page = setup_page(config, "", false);
+    CHECK(page.find("name=\"d.catbox.max_mb\"") != std::string::npos);
+    CHECK(page.find("name=\"d.usb.max_mb\"") == std::string::npos);
+}
+
 TEST(setup_form_changes_the_config)
 {
     Config config = ready_config();
@@ -607,6 +833,8 @@ TEST(setup_form_changes_the_config)
     CHECK_EQ(errors.size(), 3u);
     const std::string page = setup_page(config, "Saved", false);
     CHECK(page.find("name=\"d.discord.url\"") != std::string::npos);
+    // Destinations fold up under their names; their fields are still in the form.
+    CHECK(page.find("<details class=\"card\"><summary><h2>Discord") != std::string::npos);
     // Saved secrets never go back to the browser; an empty field keeps them.
     CHECK(page.find("webhooks/2/x") == std::string::npos);
     CHECK(page.find("123:abc") == std::string::npos);

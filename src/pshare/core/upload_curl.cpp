@@ -10,17 +10,18 @@
 //   (neither)       the PC tests, against the system's libcurl.
 //
 // Files are streamed from disk through curl's MIME API (multipart) or a read
-// callback (a raw body), so a 1 GB clip costs no memory.
+// callback (a raw body, whole or a slice), so a 1 GB clip costs no memory.
 
 #include "pshare/core/upload.hpp"
 
 #include <curl/curl.h>
 
 #include <algorithm>
-#include <cstdio>
+#include <fcntl.h>
 #include <mutex>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <unistd.h>
 
 #if defined(PSHARE_CONSOLE)
 #include "console_curl.h"
@@ -92,26 +93,42 @@ size_t on_body(char *data, size_t size, size_t count, void *user)
     return bytes;
 }
 
+struct ProgressSink
+{
+    UploadProgress *progress = nullptr;
+    std::uint64_t offset = 0; // a slice: where it starts in the file
+    bool slice = false;       // a slice: the total stays the whole file's
+};
+
 int on_progress(void *user, curl_off_t, curl_off_t, curl_off_t upload_total, curl_off_t uploaded)
 {
-    UploadProgress *progress = static_cast<UploadProgress *>(user);
+    const ProgressSink *sink = static_cast<const ProgressSink *>(user);
+    UploadProgress *progress = sink->progress;
     if (progress == nullptr)
         return 0;
-    if (upload_total > 0)
+    if (upload_total > 0 && !sink->slice)
         progress->total = static_cast<std::uint64_t>(upload_total);
-    progress->sent = static_cast<std::uint64_t>(uploaded);
+    progress->sent = sink->offset + static_cast<std::uint64_t>(uploaded);
     return progress->cancel.load() ? 1 : 0; // non-zero aborts the transfer
 }
 
 struct RawBody
 {
-    std::FILE *file = nullptr;
+    int file = -1;
+    std::uint64_t at = 0;
+    std::uint64_t left = 0;
 };
 
 size_t on_read(char *buffer, size_t size, size_t count, void *user)
 {
     RawBody *raw = static_cast<RawBody *>(user);
-    return std::fread(buffer, 1, size * count, raw->file);
+    const size_t wanted = static_cast<size_t>(std::min<std::uint64_t>(size * count, raw->left));
+    const ssize_t got = pread(raw->file, buffer, wanted, static_cast<off_t>(raw->at));
+    if (got < 0)
+        return CURL_READFUNC_ABORT;
+    raw->at += static_cast<std::uint64_t>(got);
+    raw->left -= static_cast<std::uint64_t>(got);
+    return static_cast<size_t>(got);
 }
 } // namespace
 
@@ -153,8 +170,15 @@ HttpResult perform_request(const HttpRequest &request, UploadProgress *progress,
     curl_easy_setopt(easy, CURLOPT_WRITEFUNCTION, on_body);
     curl_easy_setopt(easy, CURLOPT_WRITEDATA, &sink);
     curl_easy_setopt(easy, CURLOPT_NOPROGRESS, 0L);
+    ProgressSink progress_sink;
+    progress_sink.progress = progress;
+    if (request.body == BodyKind::raw_file && request.raw_length > 0)
+    {
+        progress_sink.offset = request.raw_offset;
+        progress_sink.slice = true;
+    }
     curl_easy_setopt(easy, CURLOPT_XFERINFOFUNCTION, on_progress);
-    curl_easy_setopt(easy, CURLOPT_XFERINFODATA, progress);
+    curl_easy_setopt(easy, CURLOPT_XFERINFODATA, &progress_sink);
 
     curl_slist *headers = nullptr;
     for (const std::string &header : request.headers)
@@ -194,14 +218,19 @@ HttpResult perform_request(const HttpRequest &request, UploadProgress *progress,
     }
     else if (request.body == BodyKind::raw_file)
     {
-        raw.file = std::fopen(request.raw_path.c_str(), "rb");
+        raw.file = open(request.raw_path.c_str(), O_RDONLY);
         struct stat info
         {
         };
-        if (raw.file == nullptr || stat(request.raw_path.c_str(), &info) != 0)
+        const std::uint64_t size = raw.file >= 0 && fstat(raw.file, &info) == 0
+                                       ? static_cast<std::uint64_t>(info.st_size)
+                                       : 0;
+        raw.at = request.raw_offset;
+        raw.left = request.raw_length > 0 ? request.raw_length : size;
+        if (raw.file < 0 || raw.at + raw.left > size)
         {
-            if (raw.file)
-                std::fclose(raw.file);
+            if (raw.file >= 0)
+                close(raw.file);
             result.error = "Cannot read " + request.raw_path;
             curl_slist_free_all(headers);
             curl_easy_cleanup(easy);
@@ -209,15 +238,26 @@ HttpResult perform_request(const HttpRequest &request, UploadProgress *progress,
         }
         headers = curl_slist_append(headers, ("Content-Type: " + request.raw_type).c_str());
         curl_easy_setopt(easy, CURLOPT_POST, 1L);
-        curl_easy_setopt(easy, CURLOPT_POSTFIELDSIZE_LARGE, static_cast<curl_off_t>(info.st_size));
+        curl_easy_setopt(easy, CURLOPT_POSTFIELDSIZE_LARGE, static_cast<curl_off_t>(raw.left));
         curl_easy_setopt(easy, CURLOPT_READFUNCTION, on_read);
         curl_easy_setopt(easy, CURLOPT_READDATA, &raw);
+    }
+    else if (request.body == BodyKind::text)
+    {
+        headers = curl_slist_append(headers, ("Content-Type: " + request.raw_type).c_str());
+        curl_easy_setopt(easy, CURLOPT_POST, 1L);
+        curl_easy_setopt(easy, CURLOPT_POSTFIELDS, request.text.c_str());
+        curl_easy_setopt(easy, CURLOPT_POSTFIELDSIZE_LARGE,
+                         static_cast<curl_off_t>(request.text.size()));
     }
     else
     {
         curl_easy_setopt(easy, CURLOPT_POST, 1L);
         curl_easy_setopt(easy, CURLOPT_POSTFIELDSIZE, 0L);
     }
+    // PUT and the like still send the body set up above.
+    if (!request.method.empty())
+        curl_easy_setopt(easy, CURLOPT_CUSTOMREQUEST, request.method.c_str());
     curl_easy_setopt(easy, CURLOPT_HTTPHEADER, headers);
 
     const CURLcode code = curl_easy_perform(easy);
@@ -234,8 +274,8 @@ HttpResult perform_request(const HttpRequest &request, UploadProgress *progress,
         result.error += " (curl " + std::to_string(static_cast<int>(code)) + ")";
     }
     result.body = std::move(sink.body);
-    if (raw.file != nullptr)
-        std::fclose(raw.file);
+    if (raw.file >= 0)
+        close(raw.file);
     if (mime != nullptr)
         curl_mime_free(mime);
     curl_slist_free_all(headers);
