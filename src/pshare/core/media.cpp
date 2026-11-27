@@ -356,6 +356,58 @@ bool delete_capture(const std::string &path, const std::string &photo_root,
     return true;
 }
 
+bool add_pending_delete(const Paths &paths, const std::string &capture)
+{
+    const int file = ::open(paths.pending_deletes().c_str(), O_WRONLY | O_CREAT | O_APPEND, 0666);
+    if (file < 0)
+        return false;
+    const std::string line = capture + "\n";
+    const bool ok = ::write(file, line.data(), line.size()) == static_cast<ssize_t>(line.size());
+    ::close(file);
+    return ok;
+}
+
+int delete_pending_captures(const Paths &paths)
+{
+    const std::string list = paths.pending_deletes();
+    const std::string taken = list + ".taking";
+    // A list left over from an interrupted run comes first.
+    struct stat info
+    {
+    };
+    if (::stat(taken.c_str(), &info) != 0 && ::rename(list.c_str(), taken.c_str()) != 0)
+        return 0;
+    std::string text;
+    {
+        const int file = ::open(taken.c_str(), O_RDONLY);
+        if (file < 0)
+            return 0;
+        char buffer[4096];
+        ssize_t got = 0;
+        while ((got = ::read(file, buffer, sizeof(buffer))) > 0)
+            text.append(buffer, static_cast<std::size_t>(got));
+        ::close(file);
+    }
+    int deleted = 0;
+    for (const std::string &line : split(text, '\n'))
+    {
+        const std::string path(trim(line));
+        if (path.empty())
+            continue;
+        struct stat left
+        {
+        };
+        const bool capture =
+            starts_with(path, paths.photo_root + "/") || starts_with(path, paths.video_root + "/");
+        if (delete_capture(path, paths.photo_root, paths.video_root, nullptr))
+            ++deleted;
+        else if (capture && ::stat(path.c_str(), &left) == 0)
+            (void)add_pending_delete(paths, path); // still there: tried again next time
+    }
+    ::unlink(taken.c_str());
+    return deleted;
+}
+
 // ---- game names ------------------------------------------------------------
 
 bool TitleNames::parse_param_json(std::string_view json, std::string *name)

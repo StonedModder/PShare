@@ -66,6 +66,11 @@ padding:16px;margin:14px 0}
 .tag{font-size:12px;font-weight:600;color:var(--bg);background:var(--aqua);
 border-radius:99px;padding:2px 9px}
 .off .tag{background:var(--muted)}
+summary{cursor:pointer;list-style:none}summary::-webkit-details-marker{display:none}
+summary h2::after{content:"\203A";margin-left:auto;font-size:24px;color:var(--muted);
+transition:transform .15s}
+details[open] summary h2::after{transform:rotate(90deg)}
+details.card:not([open]) h2{margin:0}
 label{display:block;font-size:13px;color:var(--muted);margin:10px 0 4px}
 input,select,textarea{width:100%;font:inherit;color:var(--text);background:#17134180;
 border:2px solid var(--line);border-radius:12px;padding:10px 12px}
@@ -747,12 +752,14 @@ std::string setup_page(const Config &config, std::string_view notice, bool notic
     for (const Destination &d : config.destinations)
     {
         const std::string prefix = "d." + d.id + ".";
-        body += d.enabled ? "<section class=\"card\">" : "<section class=\"card off\">";
-        body += "<h2>";
+        // Each destination folds up under its name, so the page stays short. The
+        // fields of a closed one are still sent, and an empty secret keeps its value.
+        body += d.enabled ? "<details class=\"card\">" : "<details class=\"card off\">";
+        body += "<summary><h2>";
         body += html_escape(d.display_name());
         body += " <span class=\"tag\">";
         body += html_escape(type_label(d.type));
-        body += "</span></h2>";
+        body += "</span></h2></summary>";
         yes_no(&body, prefix + "enabled", "Enabled", d.enabled);
         yes_no(&body, prefix + "also", "Also gets every new capture",
                std::find(config.also_send.begin(), config.also_send.end(), d.id) !=
@@ -765,13 +772,6 @@ std::string setup_page(const Config &config, std::string_view notice, bool notic
                          "https://discord.com/api/webhooks/...");
             text_field(&body, prefix + "username", "Post as", d.username);
             text_field(&body, prefix + "message", "Message", d.message);
-            body += "<div class=\"row\"><div>";
-            text_field(&body, prefix + "max_mb", "Size limit (MB)", std::to_string(d.max_mb),
-                       "number");
-            body += "</div><div>";
-            text_field(&body, prefix + "fallback", "Bigger files go to", d.fallback, "text",
-                       "catbox");
-            body += "</div></div>";
             break;
         case DestinationType::telegram:
             secret_field(&body, prefix + "token", "Bot token", d.token);
@@ -795,6 +795,11 @@ std::string setup_page(const Config &config, std::string_view notice, bool notic
             text_field(&body, prefix + "username", "Account", d.username);
             secret_field(&body, prefix + "token", "Password", d.token);
             break;
+        case DestinationType::onedrive:
+            text_field(&body, prefix + "client_id", "Client ID", d.client_id);
+            secret_field(&body, prefix + "token", "Refresh token", d.token);
+            text_field(&body, prefix + "path", "Folder in OneDrive", d.path, "text", "PShare");
+            break;
         case DestinationType::http:
         case DestinationType::count:
             text_field(&body, prefix + "url", "Upload URL", d.url, "url");
@@ -808,7 +813,20 @@ std::string setup_page(const Config &config, std::string_view notice, bool notic
             body += "></textarea>";
             break;
         }
-        body += "</section>";
+        if (d.has_size_limit())
+        {
+            const int ceiling = d.service_ceiling_mb();
+            body += "<div class=\"row\"><div>";
+            text_field(&body, prefix + "max_mb",
+                       ceiling > 0 ? "Size limit (MB, up to " + std::to_string(ceiling) + ")"
+                                   : std::string("Size limit (MB, 0: none)"),
+                       std::to_string(d.max_mb), "number");
+            body += "</div><div>";
+            text_field(&body, prefix + "fallback", "Bigger files go to", d.fallback, "text",
+                       "catbox");
+            body += "</div></div>";
+        }
+        body += "</details>";
     }
     body += "<p><small>Placeholders for messages: {type} {game} {title_id} {date} {time} "
             "{file} {size} {link}</small></p>";
@@ -852,6 +870,7 @@ int apply_setup_form(const std::map<std::string, std::string> &form, Config *con
             changed += set_text(&d.url, form, prefix + "url");
         changed += set_secret(&d.token, form, prefix + "token");
         changed += set_text(&d.chat_id, form, prefix + "chat_id");
+        changed += set_text(&d.client_id, form, prefix + "client_id");
         changed += set_text(&d.username, form, prefix + "username");
         changed += set_text(&d.message, form, prefix + "message");
         changed += set_text(&d.field, form, prefix + "field");
@@ -874,7 +893,8 @@ int apply_setup_form(const std::map<std::string, std::string> &form, Config *con
                 }
             }
         }
-        changed += set_int(&d.max_mb, form, prefix + "max_mb", 0, 100000, errors);
+        changed += set_int(&d.max_mb, form, prefix + "max_mb", 0,
+                           d.service_ceiling_mb() > 0 ? d.service_ceiling_mb() : 100000, errors);
         {
             std::string fallback = d.fallback;
             if (set_text(&fallback, form, prefix + "fallback"))

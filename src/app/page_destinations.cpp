@@ -30,9 +30,10 @@ enum RowId
     row_path,
     row_password,
     row_also,
+    row_client,
+    row_folder,
 };
 
-constexpr int kLimits[] = {0, 10, 25, 50, 100, 200, 500};
 constexpr const char *kKeep[] = {"1h", "12h", "24h", "72h"};
 // Where a "folder" destination copies to: a USB drive, or the console itself.
 constexpr const char *kFolderPaths[] = {"usb", "/data/pshare/Saved"};
@@ -41,6 +42,57 @@ bool also_sends(const Config &config, const std::string &id)
 {
     return std::find(config.also_send.begin(), config.also_send.end(), id) !=
            config.also_send.end();
+}
+
+struct LimitChoice
+{
+    int mb; // 0: the service's own limit (or none)
+    std::string label;
+};
+
+// The size limits offered for a destination: steps up to what its service
+// takes, named after it, and the saved value when it is not one of them.
+std::vector<LimitChoice> limit_choices(const Destination &d)
+{
+    std::vector<LimitChoice> out;
+    const auto mb = [](int value) { return std::to_string(value) + " MB"; };
+    switch (d.type)
+    {
+    case DestinationType::discord:
+        out = {{10, mb(10)},
+               {0, "20 MB (no boosts)"},
+               {50, "50 MB (boost level 2)"},
+               {100, "100 MB (boost level 3)"}};
+        break;
+    case DestinationType::telegram:
+        out = {{10, mb(10)}, {25, mb(25)}, {0, "50 MB (the Bot API's limit)"}};
+        break;
+    case DestinationType::catbox:
+        out = {{50, mb(50)}, {100, mb(100)}, {0, "200 MB (catbox's limit)"}};
+        break;
+    case DestinationType::litterbox:
+        out = {{100, mb(100)}, {200, mb(200)}, {500, mb(500)}, {0, "1 GB (Litterbox's limit)"}};
+        break;
+    default:
+        out = {{0, "No limit"}};
+        for (const int value : {10, 25, 50, 100, 200, 500, 1024, 4000})
+            out.push_back({value, value >= 1024 && value % 1024 == 0
+                                      ? std::to_string(value / 1024) + " GB"
+                                      : mb(value)});
+        break;
+    }
+    if (std::none_of(out.begin(), out.end(),
+                     [&](const LimitChoice &c) { return c.mb == d.max_mb; }))
+    {
+        // "The service's own limit" sorts by that limit (none sorts first).
+        Destination plain = d;
+        plain.max_mb = 0;
+        const int own = static_cast<int>(plain.size_limit() >> 20);
+        const auto at = std::find_if(out.begin(), out.end(), [&](const LimitChoice &c)
+                                     { return (c.mb != 0 ? c.mb : own) > d.max_mb; });
+        out.insert(at, {d.max_mb, mb(d.max_mb)});
+    }
+    return out;
 }
 
 enum class Zone : std::uint8_t
@@ -334,10 +386,17 @@ class DestinationsPage final : public Page
         }
         case DestinationType::smb:
             field(row_url, "Share", shortened(d->url),
-                  "smb://<PC address>/<shared folder>/<optional subfolder>");
+                  "smb://<PC or Mac address>/<shared folder>/<optional subfolder>");
             field(row_username, "User name", d->username.empty() ? "Guest" : d->username,
-                  "Your Windows (or Samba) account; leave empty for a guest share");
+                  "Your Windows, Mac or Samba account; leave empty for a guest share");
             field(row_password, "Password", masked(d->token), "That account's password");
+            break;
+        case DestinationType::onedrive:
+            field(row_client, "Client ID", d->client_id.empty() ? "Not set" : d->client_id,
+                  "The Application (client) ID of your app registration at portal.azure.com");
+            field(row_token, "Refresh token", masked(d->token),
+                  "Long: paste it from your phone (Auto upload > Set up from your phone)");
+            field(row_folder, "Folder", d->path, "Captures land in <folder>/<game>/ in OneDrive");
             break;
         case DestinationType::http:
         case DestinationType::count:
@@ -355,27 +414,33 @@ class DestinationsPage final : public Page
             form_.add_choice(row_keep, "Keep files for", {"1 hour", "12 hours", "1 day", "3 days"},
                              keep);
         }
-        if (d->type == DestinationType::discord || d->type == DestinationType::telegram)
+        if (d->has_size_limit())
         {
             std::vector<std::string> limits;
             int limit = 0;
-            for (std::size_t i = 0; i < std::size(kLimits); ++i)
+            limit_values_.clear();
+            for (LimitChoice &choice : limit_choices(*d))
             {
-                limits.push_back(kLimits[i] == 0 ? "Service limit"
-                                                 : std::to_string(kLimits[i]) + " MB");
-                if (kLimits[i] == d->max_mb)
-                    limit = static_cast<int>(i);
+                if (choice.mb == d->max_mb)
+                    limit = static_cast<int>(limits.size());
+                limit_values_.push_back(choice.mb);
+                limits.push_back(std::move(choice.label));
             }
+            const bool posts = d->type == DestinationType::discord ||
+                               d->type == DestinationType::telegram ||
+                               d->type == DestinationType::http;
             form_.add_choice(row_limit, "Size limit", std::move(limits), limit).description =
-                "Bigger files go to the fallback, and the link is posted instead";
+                posts ? "Bigger files go to the fallback, and the link is posted instead"
+                      : "Bigger files go to the fallback host instead";
             std::vector<std::string> fallbacks = {"None"};
             fallback_ids_ = {""};
             int chosen = 0;
             for (const Destination &other : config.destinations)
             {
-                if (other.id == d->id || (other.type != DestinationType::catbox &&
-                                          other.type != DestinationType::litterbox &&
-                                          other.type != DestinationType::http))
+                // Hosts post a link; OneDrive a share link; a drive or share keeps
+                // the file and the post says where. Not another chat.
+                if (other.id == d->id || other.type == DestinationType::discord ||
+                    other.type == DestinationType::telegram)
                     continue;
                 if (other.id == d->fallback)
                     chosen = static_cast<int>(fallbacks.size());
@@ -419,7 +484,7 @@ class DestinationsPage final : public Page
         prompt_.style.password = password;
         prompt_.style.allow_empty = true;
         prompt_.style.auto_capital = id == row_name || id == row_message || id == row_username;
-        prompt_.style.max_length = 400;
+        prompt_.style.max_length = id == row_token ? 4000 : 400; // OneDrive tokens run long
     }
 
     void apply(Context &context, ui::Feedback &feedback, int id, ui::Event event)
@@ -439,9 +504,12 @@ class DestinationsPage final : public Page
             d->litterbox_time = kKeep[std::clamp(form_.choice_index(row_keep), 0, 3)];
             break;
         case row_limit:
-            d->max_mb = kLimits[std::clamp(form_.choice_index(row_limit), 0,
-                                           static_cast<int>(std::size(kLimits)) - 1)];
+        {
+            const int index = form_.choice_index(row_limit);
+            if (index >= 0 && index < static_cast<int>(limit_values_.size()))
+                d->max_mb = limit_values_[static_cast<std::size_t>(index)];
             break;
+        }
         case row_fallback:
         {
             const int index = form_.choice_index(row_fallback);
@@ -496,7 +564,7 @@ class DestinationsPage final : public Page
             break;
         case row_url:
             title = d.type == DestinationType::discord ? "Webhook URL"
-                    : d.type == DestinationType::smb   ? "Share (smb://PC/folder)"
+                    : d.type == DestinationType::smb   ? "Share (smb://PC or Mac/folder)"
                                                        : "URL";
             value = d.url;
             if (value.empty() && d.type == DestinationType::smb)
@@ -508,9 +576,19 @@ class DestinationsPage final : public Page
             secret = true;
             break;
         case row_token:
-            title = d.type == DestinationType::telegram ? "Bot token" : "Token";
+            title = d.type == DestinationType::telegram   ? "Bot token"
+                    : d.type == DestinationType::onedrive ? "Refresh token"
+                                                          : "Token";
             value = d.token;
-            secret = d.type == DestinationType::telegram;
+            secret = d.type == DestinationType::telegram || d.type == DestinationType::onedrive;
+            break;
+        case row_client:
+            title = "Client ID";
+            value = d.client_id;
+            break;
+        case row_folder:
+            title = "OneDrive folder";
+            value = d.path;
             break;
         case row_chat:
             title = "Chat ID";
@@ -565,6 +643,12 @@ class DestinationsPage final : public Page
         case row_field:
             d->field = value.empty() ? "file" : value;
             break;
+        case row_client:
+            d->client_id = value;
+            break;
+        case row_folder:
+            d->path = value.empty() ? "PShare" : value;
+            break;
         default:
             return;
         }
@@ -604,6 +688,7 @@ class DestinationsPage final : public Page
     ui::Form form_;
     ui::InputPrompt prompt_;
     std::vector<std::string> fallback_ids_;
+    std::vector<int> limit_values_; // the size limit choices' values, in order
     int editing_ = 0;
     int form_index_owner_ = -2;
     bool focused_ = false;

@@ -108,14 +108,28 @@ Log g_log;
 
 // ---- shared state ----------------------------------------------------------
 
-// QUEUE [<destination>\t]<path>: the app hands an upload over, so it goes on
-// after the app closes. An empty destination is the configured one. Each gets
-// a number the app asks RESULT about.
+// QUEUE [<destination>\t]<path>[\t<flags>]: the app hands an upload over, so
+// it goes on after the app closes. An empty destination is the configured one.
+// Each gets a number the app asks RESULT about. Flags, comma separated:
+//   delete  delete the capture from the console once it is sent;
+//   batch   one of many ("Send all"): no notification each, one at the end.
 struct ManualJob
 {
     int id = 0;
     std::string destination;
     std::string path;
+    bool delete_after = false;
+    bool batch = false;
+};
+
+// What the batch jobs sent since the queue was last empty did, for the one
+// notification at its end.
+struct BatchTally
+{
+    int sent = 0;
+    int failed = 0;
+    int deleted = 0;
+    int waiting = 0; // sent, and left for the app to delete
 };
 
 struct Shared
@@ -123,6 +137,7 @@ struct Shared
     std::mutex mutex;
     DaemonStatus status;
     std::deque<ManualJob> manual;
+    BatchTally batch;
     int next_job = 1;
     int current_job = 0;
     // RESULT answers: "ok <destination>\t<link>" or "failed <destination>\t<error>",
@@ -209,7 +224,8 @@ bool web_open_locked()
     return g_shared.setup_until > now || g_shared.app_seen > now - 15;
 }
 
-int queue_manual(const std::string &destination, const std::string &path, std::string *error)
+int queue_manual(const std::string &destination, const std::string &path, std::string *error,
+                 std::string_view flags = {})
 {
     MediaItem item;
     if (path.empty() || !describe_media(path, &item))
@@ -217,7 +233,7 @@ int queue_manual(const std::string &destination, const std::string &path, std::s
         *error = "not a capture";
         return 0;
     }
-    if (g_shared.manual.size() >= 500)
+    if (g_shared.manual.size() >= 5000)
     {
         *error = "queue full";
         return 0;
@@ -234,6 +250,11 @@ int queue_manual(const std::string &destination, const std::string &path, std::s
     job.id = g_shared.next_job++;
     job.destination = destination;
     job.path = path;
+    for (const std::string &flag : split(flags, ','))
+    {
+        job.delete_after = job.delete_after || iequals(trim(flag), "delete");
+        job.batch = job.batch || iequals(trim(flag), "batch");
+    }
     g_shared.manual.push_back(std::move(job));
     g_shared.rescan = true;
     return g_shared.next_job - 1;
@@ -307,20 +328,30 @@ std::string handle_command(std::string_view line)
     {
         // What the app handed over and has not gone yet is dropped too.
         for (const ManualJob &job : g_shared.manual)
+        {
             g_shared.results[job.id] = "failed " + job.destination + "\tCancelled";
+            if (job.batch)
+                ++g_shared.batch.failed;
+        }
         g_shared.manual.clear();
+        while (g_shared.results.size() > 64)
+            g_shared.results.erase(g_shared.results.begin());
         g_progress.cancel = true;
         return "ok\n";
     }
     if (verb == "QUEUE")
     {
-        const std::size_t tab = argument.find('\t');
+        // <path>, <destination>\t<path> or <destination>\t<path>\t<flags>. Split
+        // before trimming: an empty destination leaves the line starting with a tab.
+        const std::vector<std::string> fields =
+            split(space == std::string::npos ? std::string_view()
+                                             : std::string_view(text).substr(space + 1),
+                  '\t');
         const std::string destination =
-            tab == std::string::npos ? std::string() : std::string(trim(argument.substr(0, tab)));
-        const std::string path =
-            tab == std::string::npos ? argument : std::string(trim(argument.substr(tab + 1)));
+            fields.size() >= 2 ? std::string(trim(fields[0])) : std::string();
+        const std::string path = std::string(trim(fields.size() >= 2 ? fields[1] : argument));
         std::string error;
-        const int id = queue_manual(destination, path, &error);
+        const int id = queue_manual(destination, path, &error, fields.size() >= 3 ? fields[2] : "");
         if (id == 0)
             return "error " + error + "\n";
         return "ok " + std::to_string(id) + "\n";
@@ -989,7 +1020,7 @@ bool fetch_through_app(const Paths &paths, const MediaItem &item, std::string *c
 // Returns the id it went to, empty when nothing was sent.
 std::string send_one(const Paths &paths, const Config &config, TitleNames *names, History *history,
                      const MediaItem &item, bool automatic, const std::string &forced = {},
-                     UploadOutcome *result = nullptr)
+                     UploadOutcome *result = nullptr, bool quiet = false)
 {
     const Destination *destination =
         forced.empty() ? config.destination_for(item.title_id) : config.find(forced);
@@ -1062,7 +1093,7 @@ std::string send_one(const Paths &paths, const Config &config, TitleNames *names
         g_log.write("sent %s -> %s", item.file.c_str(), outcome.link.c_str());
     else
         g_log.write("failed %s: %s", item.file.c_str(), outcome.error.c_str());
-    if (config.notify)
+    if (config.notify && !quiet)
     {
         if (outcome.ok)
             notify(std::string("PShare: ") + item.kind_label() +
@@ -1161,14 +1192,12 @@ int run()
         bool reload = false;
         bool rescan = false;
         bool paused = false;
-        std::deque<ManualJob> manual;
         {
             std::lock_guard<std::mutex> lock(g_shared.mutex);
             reload = g_shared.reload;
             rescan = g_shared.rescan;
             paused = g_shared.paused;
             g_shared.reload = g_shared.rescan = false;
-            manual.swap(g_shared.manual);
         }
         if (reload || file_mtime(paths.config()) != settings.mtime)
         {
@@ -1179,34 +1208,87 @@ int run()
         const Config &config = settings.config;
 
         // Captures the app asked for go first and ignore auto_upload and pause.
-        for (const ManualJob &job : manual)
+        // One at a time off the shared queue, so a CANCEL (which empties it)
+        // stops a whole "Send all".
+        while (!g_quit.load())
         {
+            ManualJob job;
             {
                 std::lock_guard<std::mutex> lock(g_shared.mutex);
+                if (g_shared.manual.empty())
+                    break;
+                job = std::move(g_shared.manual.front());
+                g_shared.manual.pop_front();
                 g_shared.current_job = job.id;
             }
             MediaItem item;
             UploadOutcome outcome;
             if (describe_media(job.path, &item))
-                send_one(paths, config, &names, &history, item, false, job.destination, &outcome);
+                send_one(paths, config, &names, &history, item, false, job.destination, &outcome,
+                         job.batch);
             else
                 outcome.error = "The capture is gone";
             if (outcome.destination.empty())
                 outcome.destination = job.destination;
+            // Deleted only once it has really gone somewhere. A payload may not
+            // be allowed to delete captures; then the app does it when it runs.
+            bool waiting = false;
+            if (outcome.ok && job.delete_after)
+            {
+                std::string why;
+                if (delete_capture(job.path, paths.photo_root, paths.video_root, &why))
+                {
+                    g_log.write("deleted %s after sending it", item.file.c_str());
+                }
+                else
+                {
+                    waiting = add_pending_delete(paths, job.path);
+                    g_log.write("could not delete %s (%s); %s", item.file.c_str(), why.c_str(),
+                                waiting ? "PShare deletes it when it runs"
+                                        : "and could not list it for PShare either");
+                }
+            }
             std::string answer = outcome.ok ? "ok " : "failed ";
             answer += outcome.destination + "\t" + (outcome.ok ? outcome.link : outcome.error);
             for (char &c : answer)
                 if (c == '\n' || c == '\r')
                     c = ' ';
+            BatchTally finished;
+            bool batch_over = false;
             {
                 std::lock_guard<std::mutex> lock(g_shared.mutex);
                 g_shared.current_job = 0;
                 g_shared.results[job.id] = std::move(answer);
                 while (g_shared.results.size() > 64)
                     g_shared.results.erase(g_shared.results.begin());
+                if (job.batch)
+                {
+                    BatchTally &tally = g_shared.batch;
+                    ++(outcome.ok ? tally.sent : tally.failed);
+                    if (outcome.ok && job.delete_after)
+                        ++(waiting ? tally.waiting : tally.deleted);
+                }
+                batch_over =
+                    g_shared.manual.empty() && g_shared.batch.sent + g_shared.batch.failed > 0;
+                if (batch_over)
+                {
+                    finished = g_shared.batch;
+                    g_shared.batch = BatchTally{};
+                }
             }
-            if (g_quit.load())
-                break;
+            if (batch_over && config.notify)
+            {
+                std::string text = "PShare: sent " + std::to_string(finished.sent) +
+                                   (finished.sent == 1 ? " capture" : " captures");
+                if (finished.failed > 0)
+                    text += ", " + std::to_string(finished.failed) + " failed";
+                if (finished.deleted > 0)
+                    text += ", " + std::to_string(finished.deleted) + " deleted from the console";
+                if (finished.waiting > 0)
+                    text +=
+                        ", " + std::to_string(finished.waiting) + " to delete when PShare opens";
+                notify(text);
+            }
         }
 
         const std::int64_t now = now_seconds();
