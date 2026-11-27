@@ -36,8 +36,8 @@ body:
       label: "Where does it happen?"
       options:
         - "Captures / clip player"
-        - "Uploading (Discord, Telegram, catbox, ...)"
-        - "USB drive or PC share copies"
+        - "Uploading (Discord, Telegram, catbox, OneDrive, ...)"
+        - "USB drive or PC / Mac share copies"
         - "Background uploader (pshared)"
         - "Phone / browser page"
         - "Starting the app or file access (Lapy)"
