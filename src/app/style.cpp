@@ -92,6 +92,8 @@ gfx::Color destination_color(DestinationType type)
         return rgb(0x7fe0a8);
     case DestinationType::smb:
         return rgb(0x8fd3ff);
+    case DestinationType::onedrive:
+        return rgb(0x4f9dff);
     case DestinationType::http:
     case DestinationType::count:
         break;
